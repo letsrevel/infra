@@ -1,0 +1,179 @@
+groups:
+  - name: infrastructure
+    interval: 30s
+    rules:
+      # ========================================================================
+      # Critical Infrastructure Alerts
+      # ========================================================================
+
+      # Service Down
+      - alert: ServiceDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service {{ $labels.job }} is down"
+          description: "{{ $labels.job }} on {{ $labels.instance }} has been down for more than 2 minutes."
+
+      # High CPU Usage
+      - alert: HighCPUUsage
+        expr: (100 - (avg by (instance) (rate(process_cpu_seconds_total[5m])) * 100)) < 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: "CPU usage is above 90% for more than 5 minutes."
+
+      # High Memory Usage
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: "Memory usage is above 90% for more than 5 minutes."
+
+      # Disk Space Low
+      - alert: DiskSpaceLow
+        expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) * 100 < 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low disk space on {{ $labels.instance }}"
+          description: "Available disk space is below 10% on {{ $labels.device }}."
+
+      # Disk Space Critical
+      - alert: DiskSpaceCritical
+        expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) * 100 < 5
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical disk space on {{ $labels.instance }}"
+          description: "Available disk space is below 5% on {{ $labels.device }}. Immediate action required."
+
+      # ========================================================================
+      # Database Alerts
+      # ========================================================================
+
+      # PostgreSQL Down
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL is down"
+          description: "PostgreSQL database has been down for more than 1 minute."
+
+      # High Database Connections
+      - alert: HighDatabaseConnections
+        expr: (pg_stat_database_numbackends / pg_settings_max_connections) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High database connection usage"
+          description: "Database connections are above 80% of max_connections."
+
+      # Slow Queries
+      - alert: SlowQueries
+        expr: rate(pg_stat_statements_mean_exec_time[5m]) > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow database queries detected"
+          description: "Average query execution time is above 1 second."
+
+      # Database Replication Lag (if using replication)
+      - alert: PostgresReplicationLag
+        expr: pg_replication_lag > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL replication lag is high"
+          description: "Replication lag is {{ $value }} seconds."
+
+      # ========================================================================
+      # Redis Alerts
+      # ========================================================================
+
+      # Redis Down
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis is down"
+          description: "Redis cache has been down for more than 1 minute."
+
+      # Redis Memory Usage High
+      - alert: RedisMemoryHigh
+        expr: (redis_memory_used_bytes / redis_memory_max_bytes) * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis memory usage is high"
+          description: "Redis memory usage is above 90%."
+
+      # Redis Connections High
+      - alert: RedisConnectionsHigh
+        expr: redis_connected_clients > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High number of Redis connections"
+          description: "Redis has {{ $value }} connected clients."
+
+      # Redis Hit Rate Low
+      - alert: RedisHitRateLow
+        expr: (rate(redis_keyspace_hits_total[5m]) / (rate(redis_keyspace_hits_total[5m]) + rate(redis_keyspace_misses_total[5m]))) * 100 < 50
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis cache hit rate is low"
+          description: "Redis hit rate is {{ $value }}%, indicating possible cache inefficiency."
+
+      # ========================================================================
+      # Observability Stack Alerts
+      # ========================================================================
+
+      # Loki Down
+      - alert: LokiDown
+        expr: up{job="loki"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Loki logging service is down"
+          description: "Loki has been down for more than 5 minutes. Log collection is impacted."
+
+      # Tempo Down
+      - alert: TempoDown
+        expr: up{job="tempo"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tempo tracing service is down"
+          description: "Tempo has been down for more than 5 minutes. Trace collection is impacted."
+
+      # Prometheus Storage Low
+      - alert: PrometheusStorageLow
+        expr: (prometheus_tsdb_storage_blocks_bytes / prometheus_tsdb_retention_limit_bytes) * 100 > 85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prometheus storage usage is high"
+          description: "Prometheus storage is {{ $value }}% full."

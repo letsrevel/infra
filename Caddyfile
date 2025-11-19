@@ -1,0 +1,107 @@
+{
+    # Global options for better performance
+    servers {
+        max_header_size 16KB
+    }
+}
+
+# -------------------------------------------------------
+# Revel Frontend (beta.letsrevel.io)
+# -------------------------------------------------------
+beta.letsrevel.io {
+    encode zstd gzip
+
+    # Optional: short cache for SSR HTML
+    @html {
+        path / /index.html
+    }
+    handle @html {
+        reverse_proxy revel_frontend:3000 {
+            transport http {
+                keepalive 90s
+                keepalive_idle_conns 32
+                max_conns_per_host 100
+            }
+            flush_interval -1
+        }
+        header Cache-Control "public, max-age=30, stale-while-revalidate=60"
+    }
+
+    # Static assets with long cache
+    @static {
+        path /_app/* /images/* /fonts/* *.js *.css *.woff2 *.png *.jpg *.jpeg *.svg *.ico
+    }
+    handle @static {
+        reverse_proxy revel_frontend:3000 {
+            transport http {
+                keepalive 90s
+                keepalive_idle_conns 32
+                max_conns_per_host 100
+            }
+            flush_interval -1
+        }
+        header Cache-Control "public, max-age=31536000, immutable"
+    }
+
+    # Everything else (API calls, etc.)
+    handle {
+        reverse_proxy revel_frontend:3000 {
+            transport http {
+                keepalive 90s
+                keepalive_idle_conns 32
+                max_conns_per_host 100
+            }
+            flush_interval -1
+        }
+    }
+}
+
+# -------------------------------------------------------
+# Revel API (beta-api.letsrevel.io)
+# -------------------------------------------------------
+beta-api.letsrevel.io {
+    encode zstd gzip
+
+    # Block access to metrics endpoint (internal use only)
+    handle /metrics* {
+        respond "Not Found" 404
+    }
+
+    # Serve uploaded media files directly
+    handle_path /media/* {
+        root * /srv/revel_media
+        file_server
+        header Cache-Control "public, max-age=86400"
+    }
+
+    # Proxy all other requests to Django
+    handle {
+        reverse_proxy revel_web:8000 {
+            transport http {
+                keepalive 90s
+                keepalive_idle_conns 32
+                max_conns_per_host 100
+            }
+            flush_interval -1
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+}
+
+# -------------------------------------------------------
+# Revel Flower (flower.letsrevel.io)
+# -------------------------------------------------------
+flower.letsrevel.io {
+    reverse_proxy revel_flower:5555
+    encode gzip
+}
+
+# -------------------------------------------------------
+# Revel Grafana (grafana.letsrevel.io)
+# -------------------------------------------------------
+grafana.letsrevel.io {
+    reverse_proxy revel_grafana:3000
+    encode gzip
+}

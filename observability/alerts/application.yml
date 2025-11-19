@@ -1,0 +1,173 @@
+groups:
+  - name: application
+    interval: 30s
+    rules:
+      # ========================================================================
+      # Application Health Alerts
+      # ========================================================================
+
+      # Application Down
+      - alert: ApplicationDown
+        expr: probe_success{job="healthcheck"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Application healthcheck is failing"
+          description: "The application at {{ $labels.instance }} has been unhealthy for more than 2 minutes."
+
+      # High HTTP Error Rate
+      - alert: HighHTTPErrorRate
+        expr: (sum(rate(django_http_responses_total_by_status_total{status=~"5.."}[5m])) / sum(rate(django_http_responses_total_by_status_total[5m]))) * 100 > 5
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High HTTP 5xx error rate"
+          description: "HTTP 5xx error rate is {{ $value }}% over the last 5 minutes."
+
+      # High HTTP 4xx Rate
+      - alert: HighHTTP4xxRate
+        expr: (sum(rate(django_http_responses_total_by_status_total{status=~"4.."}[5m])) / sum(rate(django_http_responses_total_by_status_total[5m]))) * 100 > 20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High HTTP 4xx error rate"
+          description: "HTTP 4xx error rate is {{ $value }}% over the last 10 minutes."
+
+      # Slow HTTP Requests
+      - alert: SlowHTTPRequests
+        expr: histogram_quantile(0.95, rate(django_http_requests_latency_seconds_bucket[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow HTTP request latency"
+          description: "95th percentile latency is {{ $value }}s, exceeding 2 seconds threshold."
+
+      # High Request Rate
+      - alert: HighRequestRate
+        expr: sum(rate(django_http_requests_total[5m])) > 1000
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "High request rate detected"
+          description: "Application is receiving {{ $value }} requests/second."
+
+      # ========================================================================
+      # Celery Alerts
+      # ========================================================================
+
+      # Celery Worker Down
+      - alert: CeleryWorkerDown
+        expr: up{job="celery"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Celery worker is down"
+          description: "Celery worker has been down for more than 2 minutes. Background tasks are not being processed."
+
+      # High Celery Queue Length
+      - alert: HighCeleryQueueLength
+        expr: flower_queue_length > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Celery queue is backing up"
+          description: "Celery queue {{ $labels.queue }} has {{ $value }} pending tasks."
+
+      # Celery Task Failure Rate High
+      - alert: HighCeleryTaskFailureRate
+        expr: (rate(flower_task_failed_total[5m]) / rate(flower_task_total[5m])) * 100 > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High Celery task failure rate"
+          description: "Celery task failure rate is {{ $value }}%."
+
+      # Slow Celery Tasks
+      - alert: SlowCeleryTasks
+        expr: rate(flower_task_runtime_seconds_sum[5m]) / rate(flower_task_runtime_seconds_count[5m]) > 60
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Celery tasks are running slowly"
+          description: "Average task runtime is {{ $value }} seconds."
+
+      # ========================================================================
+      # Security Alerts
+      # ========================================================================
+
+      # ClamAV Down
+      - alert: ClamAVDown
+        expr: up{job="clamav"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ClamAV antivirus service is down"
+          description: "ClamAV has been down for more than 5 minutes. File scanning is disabled."
+
+      # High Authentication Failure Rate
+      - alert: HighAuthenticationFailureRate
+        expr: rate(django_http_responses_total_by_view_transport_method_total{view=~".*login.*",status="401"}[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High authentication failure rate"
+          description: "Detecting {{ $value }} failed login attempts per second. Possible brute force attack."
+
+      # ========================================================================
+      # Business Logic Alerts
+      # ========================================================================
+
+      # Low Active Users
+      - alert: LowActiveUsers
+        expr: sum(increase(django_http_requests_total[1h])) < 100
+        for: 2h
+        labels:
+          severity: info
+        annotations:
+          summary: "Low user activity detected"
+          description: "Only {{ $value }} requests in the last hour."
+
+      # High User Registration Rate
+      - alert: HighUserRegistrationRate
+        expr: rate(django_http_responses_total_by_view_transport_method_total{view=~".*register.*",status="200"}[5m]) > 5
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "High user registration rate"
+          description: "Detecting {{ $value }} registrations per second. Verify if legitimate."
+
+      # ========================================================================
+      # Integration Alerts
+      # ========================================================================
+
+      # High External API Error Rate
+      - alert: HighExternalAPIErrorRate
+        expr: rate(django_http_requests_exceptions_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High rate of exceptions in external API calls"
+          description: "Detecting {{ $value }} exceptions per second when calling external APIs."
+
+      # Telegram Bot Issues
+      - alert: TelegramBotDown
+        expr: up{container_label_com_docker_compose_service="telegram"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Telegram bot service is down"
+          description: "Telegram bot has been down for more than 5 minutes."

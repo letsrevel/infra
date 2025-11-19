@@ -1,0 +1,20 @@
+# Environment files
+.env
+
+# Data directories
+media/*
+!media/.gitkeep
+
+geo-data/*
+!geo-data/.gitkeep
+
+sentinel/*
+!sentinel/.gitkeep
+
+# Backup files
+*.bak
+*.backup
+
+# Docker volumes
+*.log
+.idea/

@@ -1,0 +1,105 @@
+global:
+  resolve_timeout: 5m
+
+# Pushover integration for mobile push notifications
+route:
+  # Default receiver for all alerts
+  receiver: 'pushover'
+
+  # Group alerts by these labels to reduce notification spam
+  group_by: ['alertname', 'cluster', 'service']
+
+  # Wait 30s before sending initial notification (allows grouping)
+  group_wait: 30s
+
+  # Wait 5m before sending update about existing alert group
+  group_interval: 5m
+
+  # Wait 4h before re-sending resolved alert
+  repeat_interval: 4h
+
+  # Route configuration for different alert severities
+  routes:
+    # Critical alerts - immediate notification with emergency priority
+    - match:
+        severity: critical
+      receiver: 'pushover-critical'
+      group_wait: 10s
+      repeat_interval: 30m
+
+    # Warning alerts - normal priority
+    - match:
+        severity: warning
+      receiver: 'pushover'
+      repeat_interval: 2h
+
+    # Info alerts - low priority, sent less frequently
+    - match:
+        severity: info
+      receiver: 'pushover-info'
+      repeat_interval: 12h
+
+receivers:
+  # Critical alerts - Emergency priority (bypasses quiet hours, plays loud sound)
+  - name: 'pushover-critical'
+    pushover_configs:
+      - user_key: ${PUSHOVER_USER_KEY}
+        token: ${PUSHOVER_APP_TOKEN}
+        priority: 2  # Emergency - requires acknowledgment
+        retry: 60    # Retry every 60 seconds
+        expire: 3600 # Stop retrying after 1 hour
+        title: '🚨 [CRITICAL] Revel Alert'
+        message: |
+          {{ range .Alerts }}
+          Alert: {{ .Labels.alertname }}
+          Severity: {{ .Labels.severity }}
+          Instance: {{ .Labels.instance }}
+          Summary: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          {{ end }}
+
+  # Warning alerts - High priority (bypasses quiet hours)
+  - name: 'pushover'
+    pushover_configs:
+      - user_key: ${PUSHOVER_USER_KEY}
+        token: ${PUSHOVER_APP_TOKEN}
+        priority: 1  # High priority - bypasses quiet hours
+        title: '⚠️ [WARNING] Revel Alert'
+        message: |
+          {{ range .Alerts }}
+          Alert: {{ .Labels.alertname }}
+          Severity: {{ .Labels.severity }}
+          Instance: {{ .Labels.instance }}
+          Summary: {{ .Annotations.summary }}
+          {{ end }}
+
+  # Info alerts - Normal priority
+  - name: 'pushover-info'
+    pushover_configs:
+      - user_key: ${PUSHOVER_USER_KEY}
+        token: ${PUSHOVER_APP_TOKEN}
+        priority: 0  # Normal priority
+        title: 'ℹ️ [INFO] Revel Alert'
+        message: |
+          {{ range .Alerts }}
+          Alert: {{ .Labels.alertname }}
+          Summary: {{ .Annotations.summary }}
+          {{ end }}
+
+# Inhibition rules - suppress certain alerts when others are firing
+inhibit_rules:
+  # If service is down, don't alert about high latency
+  - source_match:
+      severity: 'critical'
+      alertname: 'ServiceDown'
+    target_match:
+      severity: 'warning'
+    equal: ['service', 'instance']
+
+  # If database is down, don't alert about connection issues
+  - source_match:
+      severity: 'critical'
+      alertname: 'PostgresDown'
+    target_match_re:
+      alertname: '.*Connection.*'
+    equal: ['instance']
