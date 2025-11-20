@@ -46,8 +46,8 @@ receivers:
       - user_key: ${PUSHOVER_USER_KEY}
         token: ${PUSHOVER_APP_TOKEN}
         priority: 2  # Emergency - requires acknowledgment
-        retry: 60    # Retry every 60 seconds
-        expire: 3600 # Stop retrying after 1 hour
+        retry: 60s   # Retry every 60 seconds
+        expire: 3600s # Stop retrying after 1 hour
         title: '🚨 [CRITICAL] Revel Alert'
         message: |
           {{ range .Alerts }}
