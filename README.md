@@ -122,6 +122,13 @@ All services run on a dedicated bridge network called `revel_network`.
 
 ## Deployment
 
+### Server Specifications
+
+Revel is deployed on a **Hetzner CCX33** instance:
+- **CPU**: 8 vCPU
+- **RAM**: 32 GB
+- **Disk**: 240 GB
+
 ### Initial Deployment
 
 1. Set up your server with Docker and Docker Compose
