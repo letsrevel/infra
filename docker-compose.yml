@@ -32,7 +32,7 @@ services:
         max-size: "10m"
         max-file: "3"
     command: >
-      gunicorn revel.asgi:application
+      gunicorn revel.wsgi:application
       --worker-class gthread
       --workers 6
       --threads 4
