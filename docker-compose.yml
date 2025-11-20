@@ -673,7 +673,7 @@ services:
   # ============================================================================
 
   clamav:
-    image: mkodockx/docker-clamav:alpine
+    image: clamav/clamav:latest
     container_name: revel_clamav
     restart: always
     logging:
