@@ -148,11 +148,6 @@ services:
     command: >
       celery -A revel flower
       --port=5555
-      --auth_provider=flower.views.auth.GoogleAuth2LoginHandler
-      --auth="${FLOWER_AUTH_EMAIL}"
-      --oauth2_key=${GOOGLE_SSO_CLIENT_ID}
-      --oauth2_secret=${GOOGLE_SSO_CLIENT_SECRET}
-      --oauth2_redirect_uri=https://flower.letsrevel.io/login
     expose:
       - "5555"
     env_file:
