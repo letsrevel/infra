@@ -688,9 +688,7 @@ services:
     environment:
       - CLAMD_CONF_MaxFileSize=256M
       - CLAMD_CONF_StreamMaxLength=256M
-      # - FRESHCLAM_CONF_Checks=24
-      # we keep getting rate-limited for no reason
-      - FRESHCLAM_DISABLE=true
+      - FRESHCLAM_CONF_Checks=24
     volumes:
       - clamav_data:/var/lib/clamav
     deploy:
