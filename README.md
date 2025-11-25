@@ -2,6 +2,18 @@
 
 This repository contains the complete infrastructure configuration for the Revel project, including all services, observability stack, and reverse proxy setup.
 
+---
+
+## 🔗 Related Repositories
+
+This repository contains the **infrastructure and deployment configurations** for Revel. The complete platform consists of:
+
+- **[revel-backend](https://github.com/letsrevel/revel-backend)** - Django REST API, business logic, database models
+- **[revel-frontend](https://github.com/letsrevel/revel-frontend)** - SvelteKit web application, user interface
+- **[infra](https://github.com/letsrevel/infra)** (this repository) - Docker Compose setup, reverse proxy, observability stack, deployment configurations
+
+---
+
 ## Overview
 
 This is a consolidated Docker Compose setup that includes:
