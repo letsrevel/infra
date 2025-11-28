@@ -486,12 +486,14 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
     command:
       - '--config.file=/etc/alertmanager/alertmanager.yml'
       - '--storage.path=/alertmanager'
       - '--web.external-url=http://alertmanager:9093'
     volumes:
-      - ./observability/alertmanager-config.yml:/etc/alertmanager/alertmanager.yml
+      - ./observability/alertmanager-config.yml:/etc/alertmanager/alertmanager.yml.template:ro
+      - ./observability/alertmanager-entrypoint.sh:/entrypoint.sh:ro
       - alertmanager_data:/alertmanager
     environment:
       PUSHOVER_USER_KEY: ${PUSHOVER_USER_KEY}
