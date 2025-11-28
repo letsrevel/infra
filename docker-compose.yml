@@ -136,6 +136,37 @@ services:
           memory: 512m
           cpus: '0.5'
 
+  celery-exporter:
+    image: danihodovic/celery-exporter:latest
+    restart: always
+    container_name: revel_celery_exporter
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      # Result backend is django-db, so celery-exporter will only monitor broker events
+    expose:
+      - "9808"
+    networks:
+      - revel_network
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:9808/metrics || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: '0.25'
+
   telegram:
     image: ghcr.io/letsrevel/revel:latest
     restart: always
