@@ -4,6 +4,7 @@ datasources:
   # Loki for logs
   - name: Loki
     type: loki
+    uid: loki
     access: proxy
     url: http://loki:3100
     isDefault: false
@@ -23,6 +24,7 @@ datasources:
   # Tempo for traces
   - name: Tempo
     type: tempo
+    uid: tempo
     access: proxy
     url: http://tempo:3200
     isDefault: false
@@ -54,6 +56,7 @@ datasources:
   # Prometheus for metrics
   - name: Prometheus
     type: prometheus
+    uid: prometheus
     access: proxy
     url: http://prometheus:9090
     isDefault: true
@@ -67,6 +70,7 @@ datasources:
   # Pyroscope for continuous profiling
   - name: Pyroscope
     type: grafana-pyroscope-datasource
+    uid: pyroscope
     access: proxy
     url: http://pyroscope:4040
     isDefault: false
