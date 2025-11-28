@@ -2,6 +2,16 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Important Constraints
+
+**NEVER create git commits** - You are not allowed to commit changes to this repository.
+
+## Working Environment
+
+**Local Development:** Commands are run locally on the developer's machine. To execute commands on the production server, use `ssh revel "cd infra && <command>"` format.
+
+**Server Directory:** The infrastructure is deployed in the `infra` directory on the production server.
+
 ## Repository Overview
 
 This is the infrastructure repository for **Revel**, a Django-based application platform. It contains the complete Docker Compose setup orchestrating all application services, infrastructure components, and a comprehensive observability stack. This repository is part of a multi-repo architecture alongside:
