@@ -153,6 +153,8 @@ services:
       - "5555"
     env_file:
       - .env
+    environment:
+      - ENABLE_OBSERVABILITY=False
     volumes:
       - ./media:/app/src/media
     networks:
