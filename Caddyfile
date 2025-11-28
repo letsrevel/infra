@@ -91,14 +91,6 @@ beta-api.letsrevel.io {
 }
 
 # -------------------------------------------------------
-# Revel Flower (flower.letsrevel.io)
-# -------------------------------------------------------
-flower.letsrevel.io {
-    reverse_proxy revel_flower:5555
-    encode gzip
-}
-
-# -------------------------------------------------------
 # Revel Grafana (grafana.letsrevel.io)
 # -------------------------------------------------------
 grafana.letsrevel.io {

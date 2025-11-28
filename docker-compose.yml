@@ -136,47 +136,6 @@ services:
           memory: 512m
           cpus: '0.5'
 
-  flower:
-    image: ghcr.io/letsrevel/revel:latest
-    restart: always
-    container_name: revel_flower
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    command: >
-      celery -A revel flower
-      --port=5555
-      --persistent=False
-      --enable_events=False
-    expose:
-      - "5555"
-    env_file:
-      - .env
-    environment:
-      - ENABLE_OBSERVABILITY=False
-    volumes:
-      - ./media:/app/src/media
-    networks:
-      - revel_network
-    depends_on:
-      pgbouncer:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "python -c 'import socket; s=socket.socket(); s.settimeout(1); s.connect((\"localhost\", 5555)); s.close()' || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    deploy:
-      resources:
-        limits:
-          memory: 512m
-          cpus: '0.5'
-
   telegram:
     image: ghcr.io/letsrevel/revel:latest
     restart: always

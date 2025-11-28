@@ -57,50 +57,6 @@ groups:
           description: "Application is receiving {{ $value }} requests/second."
 
       # ========================================================================
-      # Celery Alerts
-      # ========================================================================
-
-      # Celery Worker Down
-      - alert: CeleryWorkerDown
-        expr: up{job="celery"} == 0
-        for: 2m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Celery worker is down"
-          description: "Celery worker has been down for more than 2 minutes. Background tasks are not being processed."
-
-      # High Celery Queue Length
-      - alert: HighCeleryQueueLength
-        expr: flower_queue_length > 100
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Celery queue is backing up"
-          description: "Celery queue {{ $labels.queue }} has {{ $value }} pending tasks."
-
-      # Celery Task Failure Rate High
-      - alert: HighCeleryTaskFailureRate
-        expr: (rate(flower_task_failed_total[5m]) / rate(flower_task_total[5m])) * 100 > 10
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: "High Celery task failure rate"
-          description: "Celery task failure rate is {{ $value }}%."
-
-      # Slow Celery Tasks
-      - alert: SlowCeleryTasks
-        expr: rate(flower_task_runtime_seconds_sum[5m]) / rate(flower_task_runtime_seconds_count[5m]) > 60
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Celery tasks are running slowly"
-          description: "Average task runtime is {{ $value }} seconds."
-
-      # ========================================================================
       # Security Alerts
       # ========================================================================
 

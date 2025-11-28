@@ -38,12 +38,6 @@ scrape_configs:
     static_configs:
       - targets: ['redis-exporter:9121']
 
-  # Celery metrics (via flower)
-  - job_name: 'celery'
-    static_configs:
-      - targets: ['flower:5555']
-    metrics_path: '/metrics'
-
   # Loki metrics
   - job_name: 'loki'
     static_configs:
