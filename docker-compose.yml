@@ -149,6 +149,7 @@ services:
       celery -A revel flower
       --port=5555
       --persistent=False
+      --enable_events=False
     expose:
       - "5555"
     env_file:
