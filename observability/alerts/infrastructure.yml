@@ -16,16 +16,6 @@ groups:
           summary: "Service {{ $labels.job }} is down"
           description: "{{ $labels.job }} on {{ $labels.instance }} has been down for more than 2 minutes."
 
-      # High CPU Usage
-      - alert: HighCPUUsage
-        expr: (100 - (avg by (instance) (rate(process_cpu_seconds_total[5m])) * 100)) < 10
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "High CPU usage on {{ $labels.instance }}"
-          description: "CPU usage is above 90% for more than 5 minutes."
-
       # High Memory Usage
       - alert: HighMemoryUsage
         expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 90
