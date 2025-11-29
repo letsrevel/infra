@@ -124,16 +124,6 @@ groups:
           summary: "High number of Redis connections"
           description: "Redis has {{ $value }} connected clients."
 
-      # Redis Hit Rate Low
-      - alert: RedisHitRateLow
-        expr: (rate(redis_keyspace_hits_total[5m]) / (rate(redis_keyspace_hits_total[5m]) + rate(redis_keyspace_misses_total[5m]))) * 100 < 50
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Redis cache hit rate is low"
-          description: "Redis hit rate is {{ $value }}%, indicating possible cache inefficiency."
-
       # ========================================================================
       # Observability Stack Alerts
       # ========================================================================

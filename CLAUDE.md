@@ -4,7 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Important Constraints
 
-**NEVER create git commits** - You are not allowed to commit changes to this repository.
+**ABSOLUTELY FORBIDDEN COMMANDS:**
+- **NEVER** run `git commit` or `git push` - You are not allowed to commit or push changes to this repository
+- **NEVER** run `scp` - You are not allowed to copy files to the server using scp
+- The user will manually handle all git operations and file transfers to the server
 
 ## Working Environment
 
