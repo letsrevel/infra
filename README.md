@@ -111,7 +111,8 @@ Update the Caddyfile if you need to change domains or add new ones.
 │   └── tempo-config.yaml
 ├── media/                      # User-uploaded media files
 ├── geo-data/                   # Geographic data files
-└── sentinel/                   # LLM sentinel data
+├── sentinel/                   # LLM sentinel data
+└── certs/                      # Apple Wallet certificates (optional)
 ```
 
 ## Volumes

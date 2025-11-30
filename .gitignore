@@ -11,6 +11,9 @@ geo-data/*
 sentinel/*
 !sentinel/.gitkeep
 
+certs/*
+!certs/.gitkeep
+
 # Backup files
 *.bak
 *.backup
