@@ -115,6 +115,37 @@ Update the Caddyfile if you need to change domains or add new ones.
 └── certs/                      # Apple Wallet certificates (optional)
 ```
 
+## Apple Wallet Pass Certificates
+
+The application supports generating Apple Wallet passes for event tickets. This requires Apple Developer certificates to be placed in the `certs/` directory.
+
+### Required Files
+
+```bash
+certs/
+├── pass_certificate.pem  # Apple Pass Type ID certificate
+├── pass_key.pem          # Private key for the certificate
+└── wwdr.pem              # Apple Worldwide Developer Relations certificate
+```
+
+### Setting File Permissions
+
+**IMPORTANT:** All certificate files must be readable by the Docker container (which runs as non-root user `appuser`):
+
+```bash
+chmod 644 /path/to/revel/infra/certs/pass_certificate.pem
+chmod 644 /path/to/revel/infra/certs/pass_key.pem
+chmod 644 /path/to/revel/infra/certs/wwdr.pem
+```
+
+**Why `644` for all files (including the private key)?**
+- `644` (rw-r--r--): Owner can read/write, others can read
+- The Docker container runs as `appuser` (non-root), which needs read access to mounted files
+- While `600` would be ideal for private keys in traditional setups, Docker volume mounts require readable permissions when the container user differs from the host file owner
+- The files are only accessible within the server's filesystem (not exposed externally)
+
+If you see errors like `PermissionError: [Errno 13] Permission denied: '/app/certs/pass_certificate.pem'`, verify the file permissions are set correctly.
+
 ## Volumes
 
 The following Docker volumes are created for persistent data:
@@ -203,6 +234,25 @@ docker compose up -d --scale celery_default=4
 ```
 
 ## Troubleshooting
+
+### Certificate Permission Errors
+
+If you see errors like:
+```
+PermissionError: [Errno 13] Permission denied: '/app/certs/pass_certificate.pem'
+```
+
+Fix the certificate file permissions:
+```bash
+chmod 644 /path/to/revel/infra/certs/*.pem
+```
+
+Verify permissions are correct:
+```bash
+ls -la /path/to/revel/infra/certs/
+```
+
+All files should show `-rw-r--r--` (644 permissions).
 
 ### Check service health
 ```bash
