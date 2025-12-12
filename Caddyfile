@@ -6,6 +6,13 @@
 }
 
 # -------------------------------------------------------
+# Redirect root and www to beta
+# -------------------------------------------------------
+letsrevel.io, www.letsrevel.io {
+    redir https://beta.letsrevel.io{uri} permanent
+}
+
+# -------------------------------------------------------
 # Revel Frontend (beta.letsrevel.io)
 # -------------------------------------------------------
 beta.letsrevel.io {
