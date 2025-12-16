@@ -199,6 +199,83 @@ To update all services:
 ./deploy.sh update
 ```
 
+## 🚨 Critical: SvelteKit Streaming SSR
+
+**IMPORTANT:** The Revel frontend uses SvelteKit with **streaming Server-Side Rendering (SSR)**. Improper Caddy configuration will cause pages to hang indefinitely with "eternal loading" states.
+
+### ⚠️ Reverse Proxy Configuration
+
+**The Caddyfile MUST NOT buffer responses.** Buffering breaks SvelteKit's streaming SSR.
+
+**❌ WRONG - DO NOT USE:**
+
+```caddy
+beta.letsrevel.io {
+    reverse_proxy revel_frontend:3000 {
+        flush_interval -1  # ❌ Buffers entire response - BREAKS SVELTEKIT!
+    }
+}
+```
+
+**✅ CORRECT - Streaming enabled:**
+
+```caddy
+beta.letsrevel.io {
+    encode zstd gzip
+
+    reverse_proxy revel_frontend:3000 {
+        # No flush_interval = streaming enabled by default ✅
+        transport http {
+            keepalive 90s
+            keepalive_idle_conns 32
+            max_conns_per_host 100
+        }
+    }
+}
+```
+
+### Why This Matters
+
+**With `flush_interval -1` (buffering enabled):**
+- ❌ Caddy holds the ENTIRE HTML response in memory
+- ❌ Browser receives nothing until SSR fully completes
+- ❌ Pages appear to "hang" or show eternal loading spinner
+- ❌ Poor user experience, especially on slow connections
+- ❌ Potential timeout issues on large pages
+
+**Without buffering (default):**
+- ✅ Caddy streams HTML as SvelteKit generates it
+- ✅ Browser receives and renders content progressively
+- ✅ Faster perceived load times (better TTFB)
+- ✅ Better user experience
+- ✅ Support for large pages without timeouts
+
+### Symptoms of Misconfiguration
+
+If you experience these issues, check the Caddyfile for response buffering:
+- Pages show eternal loading spinner
+- Network tab shows request pending for many seconds
+- HTML arrives all at once after a long delay
+- Time-to-first-byte (TTFB) equals total response time
+
+### Testing Your Configuration
+
+```bash
+# Test response timing - should see progressive delivery
+curl -w "\nTTFB: %{time_starttransfer}s\nTotal: %{time_total}s\n" \
+  -o /dev/null \
+  "https://beta.letsrevel.io/events"
+
+# Good: TTFB and Total are close (streaming)
+# Bad: TTFB ≈ Total time (buffering!)
+```
+
+### Verified Working Configuration
+
+See the `Caddyfile` in this repository for the correct production configuration. All `reverse_proxy` blocks for the frontend **must not** include `flush_interval -1`.
+
+---
+
 ## Monitoring
 
 Access monitoring tools:
