@@ -29,7 +29,7 @@ beta.letsrevel.io {
                 keepalive_idle_conns 32
                 max_conns_per_host 100
             }
-            flush_interval -1
+            # Enable streaming for SSR responses (removed flush_interval -1)
         }
         header Cache-Control "public, max-age=30, stale-while-revalidate=60"
     }
@@ -45,12 +45,12 @@ beta.letsrevel.io {
                 keepalive_idle_conns 32
                 max_conns_per_host 100
             }
-            flush_interval -1
+            # Static assets can be buffered (flush_interval -1 removed for consistency)
         }
         header Cache-Control "public, max-age=31536000, immutable"
     }
 
-    # Everything else (API calls, etc.)
+    # Everything else (SSR pages, API calls, etc.)
     handle {
         reverse_proxy revel_frontend:3000 {
             transport http {
@@ -58,7 +58,7 @@ beta.letsrevel.io {
                 keepalive_idle_conns 32
                 max_conns_per_host 100
             }
-            flush_interval -1
+            # Enable streaming for all SSR responses (removed flush_interval -1)
         }
     }
 }
@@ -89,7 +89,7 @@ beta-api.letsrevel.io {
                 keepalive_idle_conns 32
                 max_conns_per_host 100
             }
-            flush_interval -1
+            # Removed flush_interval -1 for consistency (Django responses are typically not streamed)
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
             header_up X-Forwarded-Proto {scheme}
