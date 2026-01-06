@@ -6,16 +6,16 @@
 }
 
 # -------------------------------------------------------
-# Redirect root and www to beta
+# Redirect beta and www to root
 # -------------------------------------------------------
-letsrevel.io, www.letsrevel.io {
-    redir https://beta.letsrevel.io{uri} permanent
+beta.letsrevel.io, www.letsrevel.io {
+    redir https://letsrevel.io{uri} permanent
 }
 
 # -------------------------------------------------------
-# Revel Frontend (beta.letsrevel.io)
+# Revel Frontend (letsrevel.io)
 # -------------------------------------------------------
-beta.letsrevel.io {
+letsrevel.io {
     encode zstd gzip
 
     # Optional: short cache for SSR HTML
@@ -64,9 +64,16 @@ beta.letsrevel.io {
 }
 
 # -------------------------------------------------------
-# Revel API (beta-api.letsrevel.io)
+# Redirect beta-api to api
 # -------------------------------------------------------
 beta-api.letsrevel.io {
+    redir https://api.letsrevel.io{uri} permanent
+}
+
+# -------------------------------------------------------
+# Revel API (api.letsrevel.io)
+# -------------------------------------------------------
+api.letsrevel.io {
     encode zstd gzip
 
     # Block access to metrics endpoint (internal use only)
