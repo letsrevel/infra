@@ -67,8 +67,8 @@ deploy() {
     echo -e "${YELLOW}Rolling out celery_default...${NC}"
     docker rollout -t 120 celery_default
 
-    echo -e "${YELLOW}Rolling out beat...${NC}"
-    docker rollout -t 60 beat
+    echo -e "${YELLOW}Restarting beat (cannot run two instances)...${NC}"
+    docker compose up -d --force-recreate beat
 
     echo -e "${YELLOW}Restarting telegram (cannot run two instances)...${NC}"
     docker compose up -d --force-recreate telegram
