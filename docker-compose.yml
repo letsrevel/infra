@@ -95,11 +95,11 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "celery -A revel inspect ping -d worker-default@$$HOSTNAME"]
+      test: ["CMD-SHELL", "celery -A revel inspect ping -d worker-default@$(hostname) --timeout 5"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
+      start_period: 60s
     deploy:
       resources:
         limits:
