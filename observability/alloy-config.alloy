@@ -4,18 +4,24 @@
 // Discover local Docker containers
 discovery.docker "local_containers" {
   host = "unix:///var/run/docker.sock"
+}
 
-  // Filter to only profile specific containers
-  filter {
-    name = "name"
-    values = ["revel_web", "revel_celery_default", "revel_beat"]
+// Filter to only profile Python services (web, celery, beat)
+// Uses Docker Compose labels for compatibility with docker-rollout
+discovery.relabel "python_services" {
+  targets = discovery.docker.local_containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "(web|celery_default|beat)"
+    action        = "keep"
   }
 }
 
 // eBPF profiling component
 pyroscope.ebpf "instance" {
   forward_to = [pyroscope.write.endpoint.receiver]
-  targets    = discovery.docker.local_containers.targets
+  targets    = discovery.relabel.python_services.output
 
   // Language-specific profiling (Python enabled by default)
   python_enabled = true

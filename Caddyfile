@@ -23,7 +23,7 @@ letsrevel.io {
         path / /index.html
     }
     handle @html {
-        reverse_proxy revel_frontend:3000 {
+        reverse_proxy frontend:3000 {
             transport http {
                 keepalive 90s
                 keepalive_idle_conns 32
@@ -39,7 +39,7 @@ letsrevel.io {
         path /_app/* /images/* /fonts/* *.js *.css *.woff2 *.png *.jpg *.jpeg *.svg *.ico
     }
     handle @static {
-        reverse_proxy revel_frontend:3000 {
+        reverse_proxy frontend:3000 {
             transport http {
                 keepalive 90s
                 keepalive_idle_conns 32
@@ -52,7 +52,7 @@ letsrevel.io {
 
     # Everything else (SSR pages, API calls, etc.)
     handle {
-        reverse_proxy revel_frontend:3000 {
+        reverse_proxy frontend:3000 {
             transport http {
                 keepalive 90s
                 keepalive_idle_conns 32
@@ -86,7 +86,7 @@ api.letsrevel.io {
     handle_path /media/protected/* {
         # Validate signature with Django
         # Note: handle_path strips /media/protected from {uri}, so we add /protected back
-        forward_auth revel_web:8000 {
+        forward_auth web:8000 {
             uri /api/media/validate/protected{uri}
         }
 
@@ -109,7 +109,7 @@ api.letsrevel.io {
 
     # Proxy all other requests to Django
     handle {
-        reverse_proxy revel_web:8000 {
+        reverse_proxy web:8000 {
             transport http {
                 keepalive 90s
                 keepalive_idle_conns 32
