@@ -56,7 +56,7 @@ deploy() {
     echo -e "${YELLOW}=== ZERO-DOWNTIME DEPLOY ===${NC}"
 
     echo -e "${YELLOW}Pulling latest images...${NC}"
-    docker compose pull web frontend celery_default
+    docker compose pull web frontend celery_default beat telegram
 
     echo -e "${YELLOW}Rolling out web...${NC}"
     docker rollout -t 120 web
@@ -66,6 +66,12 @@ deploy() {
 
     echo -e "${YELLOW}Rolling out celery_default...${NC}"
     docker rollout -t 120 celery_default
+
+    echo -e "${YELLOW}Rolling out beat...${NC}"
+    docker rollout -t 60 beat
+
+    echo -e "${YELLOW}Restarting telegram (cannot run two instances)...${NC}"
+    docker compose up -d --force-recreate telegram
 
     echo -e "${GREEN}Deploy complete!${NC}"
 }
