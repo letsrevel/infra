@@ -59,13 +59,13 @@ deploy() {
     docker compose pull web frontend celery_default
 
     echo -e "${YELLOW}Rolling out web...${NC}"
-    docker rollout web
+    docker rollout -t 120 web
 
     echo -e "${YELLOW}Rolling out frontend...${NC}"
-    docker rollout frontend
+    docker rollout -t 120 frontend
 
     echo -e "${YELLOW}Rolling out celery_default...${NC}"
-    docker rollout celery_default
+    docker rollout -t 120 celery_default
 
     echo -e "${GREEN}Deploy complete!${NC}"
 }
