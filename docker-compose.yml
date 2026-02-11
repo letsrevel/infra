@@ -74,6 +74,7 @@ services:
   celery_default:
     image: ghcr.io/letsrevel/revel:latest
     restart: always
+    stop_grace_period: 300s  # Match CELERY_TASK_TIME_LIMIT so running tasks can finish
     logging:
       driver: "json-file"
       options:
