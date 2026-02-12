@@ -97,7 +97,7 @@ echo -e "${GREEN}✓ Workers drained${NC}"
 # ── Step 3: Gracefully stop remaining services ──
 echo ""
 echo -e "${YELLOW}[3/4] Stopping all remaining services...${NC}"
-docker compose down -t 60
+docker compose stop -t 60
 echo -e "${GREEN}✓ All services stopped${NC}"
 
 # ── Step 4: Reboot ──
