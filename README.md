@@ -1,5 +1,7 @@
 # Revel Infrastructure
 
+[![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/zy8nTDqQ)
+
 This repository contains the complete infrastructure configuration for the Revel project, including all services, observability stack, and reverse proxy setup.
 
 ---
