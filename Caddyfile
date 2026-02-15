@@ -124,6 +124,24 @@ api.letsrevel.io {
 }
 
 # -------------------------------------------------------
+# Revel Docs (docs.letsrevel.io)
+# -------------------------------------------------------
+docs.letsrevel.io {
+    encode zstd gzip
+    root * /srv/docs
+    file_server
+
+    # Cache static assets aggressively
+    @static {
+        path *.js *.css *.woff2 *.png *.jpg *.jpeg *.svg *.ico
+    }
+    header @static Cache-Control "public, max-age=86400"
+
+    # Short cache for HTML pages
+    header Cache-Control "public, max-age=300, stale-while-revalidate=60"
+}
+
+# -------------------------------------------------------
 # Revel Grafana (grafana.letsrevel.io)
 # -------------------------------------------------------
 grafana.letsrevel.io {

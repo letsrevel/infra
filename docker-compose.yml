@@ -15,6 +15,7 @@ services:
       - caddy_data:/data
       - caddy_config:/config
       - ./media:/srv/revel_media
+      - ./docs/site:/srv/docs:ro
     networks:
       - revel_network
 
