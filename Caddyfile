@@ -16,6 +16,7 @@ beta.letsrevel.io, www.letsrevel.io {
 # Revel Frontend (letsrevel.io)
 # -------------------------------------------------------
 letsrevel.io {
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
     encode zstd gzip
 
     # Optional: short cache for SSR HTML
@@ -74,6 +75,7 @@ beta-api.letsrevel.io {
 # Revel API (api.letsrevel.io)
 # -------------------------------------------------------
 api.letsrevel.io {
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
     encode zstd gzip
 
     # Block access to metrics endpoint (internal use only)
@@ -127,6 +129,7 @@ api.letsrevel.io {
 # Revel Docs (docs.letsrevel.io)
 # -------------------------------------------------------
 docs.letsrevel.io {
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
     encode zstd gzip
     root * /srv/docs
     file_server
@@ -145,6 +148,7 @@ docs.letsrevel.io {
 # Revel Grafana (grafana.letsrevel.io)
 # -------------------------------------------------------
 grafana.letsrevel.io {
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
     reverse_proxy revel_grafana:3000
     encode gzip
 }
