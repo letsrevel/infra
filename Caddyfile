@@ -1,154 +1,152 @@
 {
-    # Global options for better performance
-    servers {
-        max_header_size 16KB
-    }
+	# Global options for better performance
+	servers {
+		max_header_size 16KB
+	}
 }
 
 # -------------------------------------------------------
 # Redirect beta and www to root
 # -------------------------------------------------------
 beta.letsrevel.io, www.letsrevel.io {
-    redir https://letsrevel.io{uri} permanent
+	redir https://letsrevel.io{uri} permanent
 }
 
 # -------------------------------------------------------
 # Revel Frontend (letsrevel.io)
 # -------------------------------------------------------
 letsrevel.io {
-    header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-    encode zstd gzip
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+	encode zstd gzip
 
-    # Optional: short cache for SSR HTML
-    @html {
-        path / /index.html
-    }
-    handle @html {
-        reverse_proxy frontend:3000 {
-            transport http {
-                keepalive 90s
-                keepalive_idle_conns 32
-                max_conns_per_host 100
-            }
-            # Enable streaming for SSR responses (removed flush_interval -1)
-        }
-        header Cache-Control "public, max-age=30, stale-while-revalidate=60"
-    }
+	# Optional: short cache for SSR HTML
+	@html {
+		path / /index.html
+	}
+	handle @html {
+		reverse_proxy frontend:3000 {
+			transport http {
+				keepalive 90s
+				keepalive_idle_conns 32
+				max_conns_per_host 100
+			}
+			# Enable streaming for SSR responses (removed flush_interval -1)
+		}
+		header Cache-Control "public, max-age=30, stale-while-revalidate=60"
+	}
 
-    # Static assets with long cache
-    @static {
-        path /_app/* /images/* /fonts/* *.js *.css *.woff2 *.png *.jpg *.jpeg *.svg *.ico
-    }
-    handle @static {
-        reverse_proxy frontend:3000 {
-            transport http {
-                keepalive 90s
-                keepalive_idle_conns 32
-                max_conns_per_host 100
-            }
-            # Static assets can be buffered (flush_interval -1 removed for consistency)
-        }
-        header Cache-Control "public, max-age=31536000, immutable"
-    }
+	# Static assets with long cache
+	@static {
+		path /_app/* /images/* /fonts/* *.js *.css *.woff2 *.png *.jpg *.jpeg *.svg *.ico
+	}
+	handle @static {
+		reverse_proxy frontend:3000 {
+			transport http {
+				keepalive 90s
+				keepalive_idle_conns 32
+				max_conns_per_host 100
+			}
+			# Static assets can be buffered (flush_interval -1 removed for consistency)
+		}
+		header Cache-Control "public, max-age=31536000, immutable"
+	}
 
-    # Everything else (SSR pages, API calls, etc.)
-    handle {
-        reverse_proxy frontend:3000 {
-            transport http {
-                keepalive 90s
-                keepalive_idle_conns 32
-                max_conns_per_host 100
-            }
-            # Enable streaming for all SSR responses (removed flush_interval -1)
-        }
-    }
+	# Everything else (SSR pages, API calls, etc.)
+	handle {
+		reverse_proxy frontend:3000 {
+			transport http {
+				keepalive 90s
+				keepalive_idle_conns 32
+				max_conns_per_host 100
+			}
+			# Enable streaming for all SSR responses (removed flush_interval -1)
+		}
+	}
 }
 
 # -------------------------------------------------------
 # Redirect beta-api to api
 # -------------------------------------------------------
 beta-api.letsrevel.io {
-    redir https://api.letsrevel.io{uri} permanent
+	redir https://api.letsrevel.io{uri} permanent
 }
 
 # -------------------------------------------------------
 # Revel API (api.letsrevel.io)
 # -------------------------------------------------------
 api.letsrevel.io {
-    header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-    encode zstd gzip
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+	encode zstd gzip
 
-    # Block access to metrics endpoint (internal use only)
-    handle /metrics* {
-        respond "Not Found" 404
-    }
+	# Block access to metrics endpoint (internal use only)
+	handle /metrics* {
+		respond "Not Found" 404
+	}
 
-    # Protected media files - require signed URL validation
-    # Single rule covers ALL protected files (protected/file/*, protected/questionnaire_files/*, etc.)
-    handle_path /media/protected/* {
-        # Validate signature with Django
-        # Note: handle_path strips /media/protected from {uri}, so we add /protected back
-        forward_auth web:8000 {
-            uri /api/media/validate/protected{uri}
-        }
+	# Protected media files - require signed URL validation
+	# Single rule covers ALL protected files (protected/file/*, protected/questionnaire_files/*, etc.)
+	handle_path /media/protected/* {
+		# Validate signature with Django
+		# Note: handle_path strips /media/protected from {uri}, so we add /protected back
+		forward_auth web:8000 {
+			uri /api/media/validate/protected{uri}
+		}
 
-        # Serve from media directory
-        # Note: handle_path strips /media/protected, so root must include /protected
-        root * /srv/revel_media/protected
-        file_server
+		# Serve from media directory
+		# Note: handle_path strips /media/protected, so root must include /protected
+		root * /srv/revel_media/protected
+		file_server
 
-        # Private caching (browser only, not CDN)
-        header Cache-Control "private, max-age=3600"
-    }
+		# Private caching (browser only, not CDN)
+		header Cache-Control "private, max-age=3600"
+	}
 
-    # Public media files - served directly without validation
-    # (logos, cover-art, and other non-protected content)
-    handle_path /media/* {
-        root * /srv/revel_media
-        file_server
-        header Cache-Control "public, max-age=86400"
-    }
+	# Public media files - served directly without validation
+	# (logos, cover-art, and other non-protected content)
+	handle_path /media/* {
+		root * /srv/revel_media
+		file_server
+		header Cache-Control "public, max-age=86400"
+	}
 
-    # Proxy all other requests to Django
-    handle {
-        reverse_proxy web:8000 {
-            transport http {
-                keepalive 90s
-                keepalive_idle_conns 32
-                max_conns_per_host 100
-            }
-            # Removed flush_interval -1 for consistency (Django responses are typically not streamed)
-            header_up X-Real-IP {remote_host}
-            header_up X-Forwarded-For {remote_host}
-            header_up X-Forwarded-Proto {scheme}
-        }
-    }
+	# Proxy all other requests to Django
+	handle {
+		reverse_proxy web:8000 {
+			transport http {
+				keepalive 90s
+				keepalive_idle_conns 32
+				max_conns_per_host 100
+			}
+			# Removed flush_interval -1 for consistency (Django responses are typically not streamed)
+			header_up X-Real-IP {remote_host}
+		}
+	}
 }
 
 # -------------------------------------------------------
 # Revel Docs (docs.letsrevel.io)
 # -------------------------------------------------------
 docs.letsrevel.io {
-    header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-    encode zstd gzip
-    root * /srv/docs
-    file_server
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+	encode zstd gzip
+	root * /srv/docs
+	file_server
 
-    # Cache static assets aggressively
-    @static {
-        path *.js *.css *.woff2 *.png *.jpg *.jpeg *.svg *.ico
-    }
-    header @static Cache-Control "public, max-age=86400"
+	# Cache static assets aggressively
+	@static {
+		path *.js *.css *.woff2 *.png *.jpg *.jpeg *.svg *.ico
+	}
+	header @static Cache-Control "public, max-age=86400"
 
-    # Short cache for HTML pages
-    header Cache-Control "public, max-age=300, stale-while-revalidate=60"
+	# Short cache for HTML pages
+	header Cache-Control "public, max-age=300, stale-while-revalidate=60"
 }
 
 # -------------------------------------------------------
 # Revel Grafana (grafana.letsrevel.io)
 # -------------------------------------------------------
 grafana.letsrevel.io {
-    header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-    reverse_proxy revel_grafana:3000
-    encode gzip
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+	reverse_proxy revel_grafana:3000
+	encode gzip
 }
