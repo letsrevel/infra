@@ -574,6 +574,8 @@ services:
     depends_on:
       pyroscope:
         condition: service_started
+      loki:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:12345/ready"]
       interval: 10s

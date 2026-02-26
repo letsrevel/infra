@@ -46,3 +46,64 @@ pyroscope.write "endpoint" {
     "instance"    = env("HOSTNAME"),
   }
 }
+
+// =============================================================================
+// Log collection — scrape Docker container logs, parse structlog JSON, push to Loki
+// =============================================================================
+
+// Filter Docker targets to application services only
+discovery.relabel "log_services" {
+  targets = discovery.docker.local_containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "(web|celery_default|beat|telegram)"
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service_name"
+  }
+}
+
+// Scrape container logs via Docker API
+loki.source.docker "app_logs" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.log_services.output
+  forward_to = [loki.process.parse_json.receiver]
+}
+
+// Parse structlog JSON, extract level label, use structlog timestamp
+loki.process "parse_json" {
+  forward_to = [loki.write.default.receiver]
+
+  stage.json {
+    expressions = {
+      level     = "level",
+      timestamp = "timestamp",
+    }
+  }
+
+  stage.labels {
+    values = {
+      level = "",
+    }
+  }
+
+  stage.timestamp {
+    source = "timestamp"
+    format = "2006-01-02T15:04:05.999999Z07:00"
+  }
+}
+
+// Push logs to Loki
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+
+  external_labels = {
+    "environment" = env("DEPLOYMENT_ENVIRONMENT"),
+  }
+}

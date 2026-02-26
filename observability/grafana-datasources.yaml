@@ -16,10 +16,6 @@ datasources:
           matcherRegex: '"trace_id":"(\\w+)"'
           name: TraceID
           url: '$${__value.raw}'
-        - datasourceUid: tempo
-          matcherRegex: "trace_id=(\\w+)"
-          name: TraceID (legacy)
-          url: '$${__value.raw}'
 
   # Tempo for traces
   - name: Tempo
