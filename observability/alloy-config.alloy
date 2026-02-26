@@ -80,8 +80,15 @@ loki.process "parse_json" {
 
   stage.json {
     expressions = {
-      level     = "level",
-      timestamp = "timestamp",
+      level       = "level",
+      timestamp   = "timestamp",
+      msg         = "event",
+      trace_id    = "trace_id",
+      request_id  = "request_id",
+      method      = "method",
+      path        = "path",
+      status_code = "status_code",
+      user_id     = "user_id",
     }
   }
 
@@ -89,6 +96,22 @@ loki.process "parse_json" {
     values = {
       level = "",
     }
+  }
+
+  stage.structured_metadata {
+    values = {
+      trace_id    = "",
+      request_id  = "",
+      method      = "",
+      path        = "",
+      status_code = "",
+      user_id     = "",
+    }
+  }
+
+  // Replace raw JSON blob with just the event message
+  stage.output {
+    source = "msg"
   }
 
   stage.timestamp {
