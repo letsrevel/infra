@@ -112,6 +112,18 @@ case $COMMAND in
         echo -e "${YELLOW}Updating services...${NC}"
         docker compose pull
         docker compose up -d
+        # `docker compose up -d` only recreates a container when its image or
+        # compose spec changes — NOT when an edited *mounted config file* changes.
+        # So Caddyfile / Alloy / Prometheus config edits would otherwise be ignored.
+        # Reload/restart the config-mounted services explicitly:
+        echo -e "${YELLOW}Applying config changes (caddy reload, alloy/prometheus restart)...${NC}"
+        # Graceful, validated reload — if the new Caddyfile is invalid, Caddy keeps
+        # serving the OLD config (no downtime) and we surface a warning.
+        if ! docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
+            echo -e "${RED}WARNING: caddy reload failed — old config is still serving. Fix the Caddyfile and re-run.${NC}"
+        fi
+        # These don't serve user traffic, so a restart is fine to pick up config.
+        docker compose restart alloy prometheus
         echo -e "${GREEN}✓ Services updated${NC}"
         ;;
 
