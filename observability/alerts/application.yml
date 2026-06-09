@@ -80,6 +80,19 @@ groups:
           summary: "High authentication failure rate"
           description: "Detecting {{ $value }} failed login attempts per second. Possible brute force attack."
 
+      # Elevated Rate-Limiting (HTTP 429)
+      # Anonymous throttles key on the Cloudflare edge IP (see infra#3, backend#479),
+      # so legitimate users behind a shared Cloudflare egress IP can be throttled
+      # collectively. Sustained 429s warrant a look (false positives or abuse).
+      - alert: ElevatedRateLimiting
+        expr: sum(rate(django_http_responses_total_by_status_total{status="429"}[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated HTTP 429 (rate-limit) responses"
+          description: "{{ $value }} throttled (429) responses/sec over 10m. Could be legit users sharing a Cloudflare-edge-IP bucket, or abuse. Triage runbook: docs/runbooks/rate-limit-429s.md"
+
       # ========================================================================
       # Business Logic Alerts
       # ========================================================================
