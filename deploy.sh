@@ -118,12 +118,19 @@ case $COMMAND in
         # Reload/restart the config-mounted services explicitly:
         echo -e "${YELLOW}Applying config changes (caddy reload, alloy/prometheus restart)...${NC}"
         # Graceful, validated reload — if the new Caddyfile is invalid, Caddy keeps
-        # serving the OLD config (no downtime) and we surface a warning.
+        # serving the OLD config (no downtime); we finish applying the other
+        # configs, then fail the deploy so the problem can't go unnoticed.
+        CADDY_RELOAD_FAILED=0
         if ! docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
+            CADDY_RELOAD_FAILED=1
             echo -e "${RED}WARNING: caddy reload failed — old config is still serving. Fix the Caddyfile and re-run.${NC}"
         fi
         # These don't serve user traffic, so a restart is fine to pick up config.
         docker compose restart alloy prometheus
+        if [ "$CADDY_RELOAD_FAILED" -ne 0 ]; then
+            echo -e "${RED}✗ Update incomplete: caddy is still serving the previous config.${NC}"
+            exit 1
+        fi
         echo -e "${GREEN}✓ Services updated${NC}"
         ;;
 
