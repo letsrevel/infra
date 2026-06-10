@@ -1,0 +1,95 @@
+# Nightly check that the Cloudflare IP ranges pinned in the Caddyfile
+# (`trusted_proxies static ...`) still match https://www.cloudflare.com/ips/.
+#
+# The Caddyfile pins the ranges statically because the stock caddy image has
+# no dynamic Cloudflare module. If Cloudflare adds a range we don't trust,
+# requests arriving from it bypass {client_ip} resolution and get logged /
+# throttled as the edge IP. If they remove a range, we trust IPs no longer
+# theirs. Either way: update the Caddyfile and deploy.
+name: Cloudflare IP drift
+
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare pinned ranges with Cloudflare's published list
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          published=$(
+            { curl -fsS https://www.cloudflare.com/ips-v4; echo; curl -fsS https://www.cloudflare.com/ips-v6; echo; } \
+              | tr '[:upper:]' '[:lower:]' | grep -v '^$' | sort -u
+          )
+          pinned=$(
+            grep -E '^[[:space:]]*trusted_proxies static ' Caddyfile \
+              | sed -E 's/^[[:space:]]*trusted_proxies static //' \
+              | tr ' ' '\n' | tr '[:upper:]' '[:lower:]' | grep -v '^$' | sort -u
+          )
+
+          if [ -z "$pinned" ]; then
+            echo "::error::No 'trusted_proxies static' line found in Caddyfile — workflow needs updating."
+            exit 1
+          fi
+
+          if [ "$published" = "$pinned" ]; then
+            echo "No drift: Caddyfile matches Cloudflare's published ranges." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          added=$(comm -23 <(echo "$published") <(echo "$pinned"))   # published, not pinned
+          removed=$(comm -13 <(echo "$published") <(echo "$pinned")) # pinned, no longer published
+
+          {
+            echo "## Cloudflare IP range drift detected"
+            echo
+            echo "Published at <https://www.cloudflare.com/ips/> but **missing from the Caddyfile**:"
+            echo '```'
+            echo "${added:-none}"
+            echo '```'
+            echo "Pinned in the Caddyfile but **no longer published** by Cloudflare:"
+            echo '```'
+            echo "${removed:-none}"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          # One open drift issue at a time — if it already exists, don't spam.
+          gh label create cloudflare-ip-drift \
+            --description "Pinned Cloudflare ranges out of date" --color D93F0B --force
+          existing=$(gh issue list --state open --label cloudflare-ip-drift --json number --jq length)
+          if [ "$existing" -gt 0 ]; then
+            echo "Open drift issue already exists — not creating another."
+            exit 1
+          fi
+
+          body=$(printf '%s\n' \
+            "The nightly check found that \`trusted_proxies static\` in the \`Caddyfile\` no longer matches <https://www.cloudflare.com/ips/>." \
+            "" \
+            "**Published but missing from the Caddyfile** (requests from these ranges are treated as untrusted — real client IP is lost for them):" \
+            '```' \
+            "${added:-none}" \
+            '```' \
+            "**Pinned but no longer published** (we still trust ranges Cloudflare may have given up):" \
+            '```' \
+            "${removed:-none}" \
+            '```' \
+            "**Fix:** update the \`trusted_proxies static\` line in the \`Caddyfile\` to the published list, then deploy (\`./deploy.sh update\` — it reloads Caddy)." \
+            "" \
+            "_Opened automatically by the \`cloudflare-ip-drift\` workflow._")
+          gh issue create \
+            --title "Cloudflare IP ranges drifted from pinned Caddyfile trusted_proxies" \
+            --label cloudflare-ip-drift \
+            --body "$body"
+          exit 1
