@@ -34,8 +34,18 @@ fi
 
 echo -e "${YELLOW}Checking configuration...${NC}"
 
-# Load environment variables
-source .env
+# Load environment variables. Parse line-by-line instead of sourcing so a
+# value with unquoted spaces or shell metacharacters can't break the script.
+while IFS= read -r line; do
+    [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+    key="${line%%=*}"
+    value="${line#*=}"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    # Strip optional surrounding quotes
+    value="${value#\"}" && value="${value%\"}"
+    value="${value#\'}" && value="${value%\'}"
+    export "$key=$value"
+done < .env
 
 # Check critical environment variables
 REQUIRED_VARS=("DB_NAME" "DB_USER" "DB_PASSWORD")
