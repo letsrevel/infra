@@ -177,6 +177,14 @@ services:
       - "3000"
     env_file:
       - .env
+    environment:
+      # adapter-node: derive event.getClientAddress() from the header Caddy
+      # sets on the frontend proxy (the real Cloudflare-resolved visitor IP).
+      - ADDRESS_HEADER=x-real-ip
+      # SSR API calls skip Cloudflare/Caddy and go straight to Django over the
+      # internal network, forwarding the visitor IP via X-Real-IP (handleFetch
+      # in the frontend). Unset to fall back to the public API URL. backend#487
+      - INTERNAL_API_URL=http://web:8000
     networks:
       - revel_network
     healthcheck:

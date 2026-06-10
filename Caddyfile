@@ -47,6 +47,10 @@ letsrevel.io {
 				max_conns_per_host 100
 			}
 			# Enable streaming for SSR responses (removed flush_interval -1)
+			# Real visitor IP for SvelteKit's getClientAddress() (adapter-node
+			# reads it via ADDRESS_HEADER=x-real-ip). SSR forwards it to the
+			# backend over the internal network — see backend#487.
+			header_up X-Real-IP {client_ip}
 		}
 		header Cache-Control "public, max-age=30, stale-while-revalidate=60"
 	}
@@ -78,6 +82,7 @@ letsrevel.io {
 				keepalive_idle_conns 32
 				max_conns_per_host 100
 			}
+			header_up X-Real-IP {client_ip}
 		}
 		header Cache-Control "public, max-age=3600, stale-while-revalidate=300"
 	}
@@ -91,6 +96,7 @@ letsrevel.io {
 				max_conns_per_host 100
 			}
 			# Enable streaming for all SSR responses (removed flush_interval -1)
+			header_up X-Real-IP {client_ip}
 		}
 	}
 }
