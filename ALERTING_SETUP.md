@@ -117,6 +117,7 @@ This reduces notification spam by bundling related alerts.
 - **SlowCeleryTasks** - Average task runtime above 60s
 - **ClamAVDown** - Antivirus scanning disabled
 - **HighAuthenticationFailureRate** - Possible brute force attack
+- **ElevatedRateLimiting** - Sustained HTTP 429s (throttling); see `docs/runbooks/rate-limit-429s.md` in revel-backend
 - **HighExternalAPIErrorRate** - External API integration issues
 - **TelegramBotDown** - Telegram bot service down
 
