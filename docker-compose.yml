@@ -175,6 +175,9 @@ services:
         max-file: "3"
     expose:
       - "3000"
+      # Internal-only Prometheus metrics (prom-client). Reachable on revel_network
+      # for the `frontend` scrape job; Caddy never routes to it. revel-frontend #400
+      - "9091"
     env_file:
       - .env
     environment:
@@ -521,6 +524,38 @@ services:
         max-file: "3"
     expose:
       - "9115"
+    networks:
+      - revel_network
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: '0.25'
+
+  # Synthetic login canary — real login through the public edge every 10 min,
+  # exposing canary_login_last_success_timestamp_seconds for CanaryLoginFailed.
+  # Stdlib-only script bind-mounted into a plain python image (no build needed).
+  # Credentials come from .env (CANARY_EMAIL / CANARY_PASSWORD); the account must
+  # have 2FA disabled. See canary/login_canary.py.
+  canary:
+    image: python:3.13-slim
+    container_name: revel_canary
+    restart: always
+    command: ["python", "-u", "/app/login_canary.py"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - ./canary/login_canary.py:/app/login_canary.py:ro
+    environment:
+      CANARY_BASE_URL: ${CANARY_BASE_URL:-https://letsrevel.io}
+      CANARY_EMAIL: ${CANARY_EMAIL}
+      CANARY_PASSWORD: ${CANARY_PASSWORD}
+      CANARY_INTERVAL: ${CANARY_INTERVAL:-600}
+    expose:
+      - "8080"
     networks:
       - revel_network
     deploy:

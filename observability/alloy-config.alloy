@@ -57,7 +57,7 @@ discovery.relabel "log_services" {
 
   rule {
     source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
-    regex         = "(web|celery_default|beat|telegram)"
+    regex         = "(web|celery_default|beat|telegram|frontend)"
     action        = "keep"
   }
 
