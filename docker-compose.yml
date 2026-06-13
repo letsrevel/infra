@@ -532,6 +532,38 @@ services:
           memory: 128m
           cpus: '0.25'
 
+  # Host metrics (CPU, memory, disk, load, network) for the Hetzner box.
+  # Reads the host's /proc, /sys and / read-only; scraped by Prometheus as
+  # job "node" on node_exporter:9100. Never exposed off revel_network.
+  node_exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: revel_node_exporter
+    restart: always
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    pid: host
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    expose:
+      - "9100"
+    networks:
+      - revel_network
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: '0.25'
+
   # Synthetic login canary — real login through the public edge every 10 min,
   # exposing canary_login_last_success_timestamp_seconds for CanaryLoginFailed.
   # Stdlib-only script bind-mounted into a plain python image (no build needed).
@@ -646,6 +678,8 @@ services:
       - GF_SERVER_ROOT_URL=https://grafana.letsrevel.io
       - GF_ANALYTICS_REPORTING_ENABLED=false
       - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      # Land on the system-health overview the moment anyone logs in.
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/etc/grafana/provisioning/dashboards/revel-health-overview.json
     volumes:
       - ./observability/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
       - ./observability/grafana-dashboard-provisioning.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml

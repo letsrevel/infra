@@ -41,6 +41,11 @@ scrape_configs:
       - targets: ['canary:8080']
     metrics_path: '/metrics'
 
+  # Host metrics (CPU, memory, disk, load, network)
+  - job_name: 'node'
+    static_configs:
+      - targets: ['node_exporter:9100']
+
   # PostgreSQL metrics
   - job_name: 'postgres'
     static_configs:
