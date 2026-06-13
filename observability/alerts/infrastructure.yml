@@ -16,6 +16,16 @@ groups:
           summary: "Service {{ $labels.job }} is down"
           description: "{{ $labels.job }} on {{ $labels.instance }} has been down for more than 2 minutes."
 
+      # High CPU Usage
+      - alert: HighCPUUsage
+        expr: 100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: "CPU usage is above 90% for more than 5 minutes."
+
       # High Memory Usage
       - alert: HighMemoryUsage
         expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 90
@@ -27,8 +37,13 @@ groups:
           description: "Memory usage is above 90% for more than 5 minutes."
 
       # Disk Space Low
+      # fstype filter excludes virtual filesystems (tmpfs, container overlays,
+      # /dev/shm, snaps): node_exporter is started with a custom
+      # --collector.filesystem.mount-points-exclude that drops the default
+      # /var/lib/docker exclusion, so without this an almost-full 64MB
+      # per-container /dev/shm would false-page. Matches the dashboard's disk panel.
       - alert: DiskSpaceLow
-        expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) * 100 < 10
+        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*|devtmpfs"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*|devtmpfs"}) * 100 < 10
         for: 5m
         labels:
           severity: warning
@@ -38,7 +53,7 @@ groups:
 
       # Disk Space Critical
       - alert: DiskSpaceCritical
-        expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) * 100 < 5
+        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*|devtmpfs"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*|devtmpfs"}) * 100 < 5
         for: 1m
         labels:
           severity: critical

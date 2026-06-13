@@ -5,8 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Important Constraints
 
 **ABSOLUTELY FORBIDDEN COMMANDS:**
-- **NEVER** run `git commit` or `git push` - You are not allowed to commit or push changes to this repository
-- **NEVER** run `scp` - You are not allowed to copy files to the server using scp
+- **NEVER** run `git commit` or `git push` on main. ALWAYS open PRs.
+- **NEVER** perform `ssh` or `scp` operations on the server without the user giving you explicit permissions
 - The user will manually handle all git operations and file transfers to the server
 
 ## Working Environment
@@ -19,8 +19,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is the infrastructure repository for **Revel**, a Django-based application platform. It contains the complete Docker Compose setup orchestrating all application services, infrastructure components, and a comprehensive observability stack. This repository is part of a multi-repo architecture alongside:
 
-- **revel-backend** - Django REST API with business logic
-- **revel-frontend** - SvelteKit web application
+- **revel-backend** - Django REST API with business logic, living at `../revel-backend`
+- **revel-frontend** - SvelteKit web application, living at `../revel-frontend`
 - **infra** (this repo) - Deployment and infrastructure configuration
 
 The application runs on a **Hetzner CCX33** instance (8 vCPU, 32GB RAM, 240GB disk).

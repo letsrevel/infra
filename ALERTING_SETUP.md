@@ -83,6 +83,11 @@ This reduces notification spam by bundling related alerts.
 
 ### Infrastructure Alerts (`alerts/infrastructure.yml`)
 
+> The host-resource alerts (**HighCPUUsage**, **HighMemoryUsage**, **DiskSpaceLow**,
+> **DiskSpaceCritical**) are backed by the `node_exporter` service (job `node`).
+> The disk alerts filter out virtual filesystems (tmpfs, container overlays,
+> `/dev/shm`) by `fstype` so they only page on real disks.
+
 #### Critical
 - **ServiceDown** - Any monitored service is unreachable
 - **PostgresDown** - Database is down
@@ -97,7 +102,6 @@ This reduces notification spam by bundling related alerts.
 - **RedisDown** - Redis cache is down
 - **RedisMemoryHigh** - Redis memory above 90%
 - **RedisConnectionsHigh** - More than 100 Redis connections
-- **RedisHitRateLow** - Cache hit rate below 50%
 - **LokiDown** - Log aggregation service down
 - **TempoDown** - Tracing service down
 - **PrometheusStorageLow** - Prometheus storage above 85%
@@ -228,7 +232,7 @@ More dashboards can be added to `observability/dashboards/` directory.
 
 - **PostgreSQL Database**: Dashboard ID `9628`
 - **Redis**: Dashboard ID `763`
-- **Node Exporter Full**: Dashboard ID `1860` (if you add node exporter)
+- **Node Exporter Full**: Dashboard ID `1860` (host metrics; `node_exporter` is deployed)
 - **Django Application**: Dashboard ID `12544`
 
 ### Dashboard Provisioning
@@ -385,8 +389,9 @@ Additional resources for alerting and dashboards:
 |---------|--------|-----|---------|
 | alertmanager | 256MB | 0.5 | Alert routing and Pushover integration |
 | blackbox-exporter | 128MB | 0.25 | Health check probing |
+| node_exporter | 128MB | 0.25 | Host metrics (CPU, memory, disk, load, network) |
 
-Total additional: **384MB RAM, 0.75 CPUs** (~1.2% RAM, 9.4% CPU on CCX33)
+Total additional: **512MB RAM, 1.0 CPUs** (~1.6% RAM, 12.5% CPU on CCX33)
 
 ---
 
