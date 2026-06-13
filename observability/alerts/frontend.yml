@@ -12,13 +12,15 @@ groups:
       # "users can't log in" regardless of which layer broke.
       # ========================================================================
 
-      # Frontend metrics endpoint unreachable (container down or :9091 not bound)
+      # Frontend metrics endpoint unreachable (container down or :9091 not bound).
+      # severity=warning and NO service label — exactly like LokiDown/TempoDown —
+      # so the generic ServiceDown critical inhibits this (the inhibit rule keys on
+      # equal ['service','instance']). Otherwise a single outage pages twice.
       - alert: FrontendDown
         expr: up{job="frontend"} == 0
         for: 2m
         labels:
-          severity: critical
-          service: frontend
+          severity: warning
         annotations:
           summary: "Frontend metrics endpoint is down"
           description: "Prometheus cannot scrape frontend:9091 (job=frontend) for more than 2 minutes — the SvelteKit Node server is down or the metrics listener stopped."
