@@ -1,0 +1,80 @@
+groups:
+  - name: frontend
+    interval: 30s
+    rules:
+      # ========================================================================
+      # Frontend (SvelteKit Node server) Alerts
+      #
+      # Added after the 2026-06-10 → 06-12 login outage (revel-frontend #400):
+      # the frontend exposed no metrics and shipped no logs, so a 2-day login
+      # breakage paged nobody. Metrics come from prom-client on frontend:9091;
+      # the synthetic login canary (canary:8080) is the signal that catches
+      # "users can't log in" regardless of which layer broke.
+      # ========================================================================
+
+      # Frontend metrics endpoint unreachable (container down or :9091 not bound)
+      - alert: FrontendDown
+        expr: up{job="frontend"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: frontend
+        annotations:
+          summary: "Frontend metrics endpoint is down"
+          description: "Prometheus cannot scrape frontend:9091 (job=frontend) for more than 2 minutes — the SvelteKit Node server is down or the metrics listener stopped."
+
+      # High 5xx share of SvelteKit-served responses
+      - alert: FrontendHighErrorRate
+        expr: (sum(rate(frontend_http_requests_total{status=~"5.."}[5m])) / sum(rate(frontend_http_requests_total[5m]))) * 100 > 5
+        for: 5m
+        labels:
+          severity: critical
+          service: frontend
+        annotations:
+          summary: "High frontend HTTP 5xx error rate"
+          description: "Frontend 5xx error rate is {{ $value | printf \"%.1f\" }}% over the last 5 minutes."
+
+      # Unhandled SSR errors caught by the handleError hook
+      - alert: FrontendSSRErrors
+        expr: sum(rate(frontend_ssr_errors_total[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          service: frontend
+        annotations:
+          summary: "Frontend SSR errors are elevated"
+          description: "Unhandled SSR errors are occurring at {{ $value | printf \"%.3f\" }}/sec over the last 5 minutes (handleError hook)."
+
+      # Absence-of-success: zero successful logins over a long window WHILE the
+      # site is otherwise serving traffic. This catches the incident class that
+      # produces no error-level events at all (e.g. dropped POST bodies → 422s
+      # logged as INFO). `or vector(0)` makes a totally-absent success series read
+      # as 0 (otherwise the alert silently never fires). The traffic floor stops
+      # a genuinely quiet night or planned maintenance from paging — TUNE the
+      # 12h window and the >1000 floor after ~1 week of observed baselines.
+      - alert: NoSuccessfulLogins
+        expr: |
+          (sum(increase(django_http_responses_total_by_view_transport_method_total{view=~".*login.*", status="200"}[12h])) or vector(0)) == 0
+          and on()
+          sum(increase(django_http_requests_total[12h])) > 1000
+        for: 30m
+        labels:
+          severity: critical
+          service: frontend
+        annotations:
+          summary: "No successful logins despite live traffic"
+          description: "Zero HTTP 200s on the login view over the last 12h while the site served >1000 requests — login is very likely broken (see revel-frontend #398/#400)."
+
+      # Synthetic login canary: pages if no real login has succeeded through the
+      # public edge for >30 min (~3 consecutive failed 10-min cycles — tolerant
+      # of a single network blip). This is the signal that would have caught the
+      # incident within minutes regardless of root cause.
+      - alert: CanaryLoginFailed
+        expr: time() - canary_login_last_success_timestamp_seconds > 1800
+        for: 1m
+        labels:
+          severity: critical
+          service: frontend
+        annotations:
+          summary: "Synthetic login canary has not succeeded in >30 min"
+          description: "Last successful canary login was {{ $value | humanizeDuration }} ago. A real end-to-end login through Cloudflare → Caddy → SvelteKit → backend is failing."

@@ -28,6 +28,19 @@ scrape_configs:
       - targets: ['web:8000']
     metrics_path: '/metrics'
 
+  # SvelteKit frontend metrics (prom-client on internal-only port 9091)
+  - job_name: 'frontend'
+    static_configs:
+      - targets: ['frontend:9091']
+    metrics_path: '/metrics'
+
+  # Synthetic login canary — real login through the public edge every 10 min.
+  # canary_login_last_success_timestamp_seconds drives the CanaryLoginFailed alert.
+  - job_name: 'canary'
+    static_configs:
+      - targets: ['canary:8080']
+    metrics_path: '/metrics'
+
   # PostgreSQL metrics
   - job_name: 'postgres'
     static_configs:
