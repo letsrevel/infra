@@ -188,6 +188,12 @@ services:
       # internal network, forwarding the visitor IP via X-Real-IP (handleFetch
       # in the frontend). Unset to fall back to the public API URL. backend#487
       - INTERNAL_API_URL=http://web:8000
+      # Public API origin the browser calls, and the frontend's own public
+      # origin. Read at RUNTIME by the frontend (revel-frontend#396), so the
+      # prebuilt image retargets without a rebuild. Wired from the API/frontend
+      # base URLs already defined in .env.
+      - PUBLIC_API_URL=${BASE_URL}
+      - ORIGIN=${FRONTEND_BASE_URL}
     networks:
       - revel_network
     healthcheck:
