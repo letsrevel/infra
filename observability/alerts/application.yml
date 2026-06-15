@@ -80,18 +80,36 @@ groups:
           summary: "High authentication failure rate"
           description: "Detecting {{ $value }} failed login attempts per second. Possible brute force attack."
 
-      # Elevated Rate-Limiting (HTTP 429)
+      # Elevated Rate-Limiting (HTTP 429) — widespread throttling only
+      #
       # Anonymous throttles key on the Cloudflare edge IP (see infra#3, backend#479),
       # so legitimate users behind a shared Cloudflare egress IP can be throttled
-      # collectively. Sustained 429s warrant a look (false positives or abuse).
+      # collectively. THAT is the actionable case this alert targets.
+      #
+      # We deliberately do NOT page on a single noisy client (one scraper/bot
+      # tripping its own per-IP bucket): the throttle is doing its job, and one
+      # IP is handled out-of-band (Cloudflare IP block). This metric has no IP
+      # label, so we approximate "many clients affected" with two conditions that
+      # a lone client cannot satisfy together:
+      #   1. 429s are a meaningful SHARE of all responses (>10%), and
+      #   2. the absolute 429 rate clears a floor (>1/s ≈ 60/min sustained).
+      # Both must hold for 5m. Self-clears ~5m after a burst ends, so it won't
+      # linger and re-notify (warning route repeats every 2h — see alertmanager).
       - alert: ElevatedRateLimiting
-        expr: sum(rate(django_http_responses_total_by_status_total{status="429"}[5m])) > 0.1
-        for: 10m
+        expr: |
+          (
+            sum(rate(django_http_responses_total_by_status_total{status="429"}[5m]))
+            /
+            sum(rate(django_http_responses_total_by_status_total[5m]))
+          ) > 0.10
+          and
+          sum(rate(django_http_responses_total_by_status_total{status="429"}[5m])) > 1
+        for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Elevated HTTP 429 (rate-limit) responses"
-          description: "{{ $value }} throttled (429) responses/sec over 10m. Could be legit users sharing a Cloudflare-edge-IP bucket, or abuse. Triage runbook: docs/runbooks/rate-limit-429s.md"
+          summary: "Widespread HTTP 429 (rate-limit) responses"
+          description: "{{ $value | humanizePercentage }} of all responses are 429s (and >1/s) over 5m — many clients being throttled, not a single bot. Likely a shared Cloudflare-edge-IP bucket hitting real users, or broad abuse. Triage runbook: docs/runbooks/rate-limit-429s.md"
 
       # ========================================================================
       # Business Logic Alerts
