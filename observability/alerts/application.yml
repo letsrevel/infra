@@ -86,15 +86,17 @@ groups:
       # so legitimate users behind a shared Cloudflare egress IP can be throttled
       # collectively. THAT is the actionable case this alert targets.
       #
-      # We deliberately do NOT page on a single noisy client (one scraper/bot
+      # We want to avoid paging on a single low-rate noisy client (one scraper/bot
       # tripping its own per-IP bucket): the throttle is doing its job, and one
-      # IP is handled out-of-band (Cloudflare IP block). This metric has no IP
-      # label, so we approximate "many clients affected" with two conditions that
-      # a lone client cannot satisfy together:
+      # IP is handled out-of-band (Cloudflare IP block). This metric has NO IP
+      # label, so we cannot distinguish clients directly — instead we approximate
+      # "broad impact" with two conditions that a low-rate client won't meet:
       #   1. 429s are a meaningful SHARE of all responses (>10%), and
       #   2. the absolute 429 rate clears a floor (>1/s ≈ 60/min sustained).
-      # Both must hold for 5m. Self-clears ~5m after a burst ends, so it won't
-      # linger and re-notify (warning route repeats every 2h — see alertmanager).
+      # Both must hold for 5m. Caveat: a single *aggressive* client (>1/s of 429s
+      # against low total traffic) can still trip this — true per-client detection
+      # needs a Loki alert keyed on ip_address. Self-clears ~5m after a burst ends,
+      # so it won't linger and re-notify (warning route repeats every 2h).
       - alert: ElevatedRateLimiting
         expr: |
           (
@@ -109,7 +111,7 @@ groups:
           severity: warning
         annotations:
           summary: "Widespread HTTP 429 (rate-limit) responses"
-          description: "{{ $value | humanizePercentage }} of all responses are 429s (and >1/s) over 5m — many clients being throttled, not a single bot. Likely a shared Cloudflare-edge-IP bucket hitting real users, or broad abuse. Triage runbook: docs/runbooks/rate-limit-429s.md"
+          description: "{{ $value | humanizePercentage }} of all responses are 429s (and >1/s) over 5m — broad throttling. Likely a shared Cloudflare-edge-IP bucket hitting real users, or abuse (note: a single aggressive client can also trip this — confirm via per-IP logs). Triage runbook: docs/runbooks/rate-limit-429s.md"
 
       # ========================================================================
       # Business Logic Alerts
