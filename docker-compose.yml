@@ -589,7 +589,7 @@ services:
   # have 2FA disabled. See canary/login_canary.py.
   canary:
     image: python:3.13-slim
-    profiles: ["observability"]
+    profiles: ["canary"]
     container_name: revel_canary
     restart: always
     command: ["python", "-u", "/app/login_canary.py"]

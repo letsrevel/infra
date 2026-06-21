@@ -118,13 +118,15 @@ feature_telegram="False"
 telegram_token=""
 if yesno "Enable Telegram bot?" n; then
 	feature_telegram="True"
-	telegram_token="$(ask "Telegram bot token")"
+	telegram_token="$(ask_secret "Telegram bot token")"
 fi
 
 feature_llm="False"
 llm_api_key=""
+llm_model="openai/gpt-4o-mini"
 if yesno "Enable LLM questionnaire evaluation?" n; then
 	feature_llm="True"
+	llm_model="$(ask "LLM model (provider/model)" "openai/gpt-4o-mini")"
 	llm_api_key="$(ask_secret "LLM API key")"
 fi
 
@@ -156,6 +158,48 @@ if yesno "Enable Stripe payments? (online ticket sales — advanced)" n; then
 fi
 
 # ---------------------------------------------------------------------------
+# 5b. Google SSO (optional) — admin login and user login are SEPARATE toggles
+# ---------------------------------------------------------------------------
+say "Google SSO (optional)"
+feature_google_sso="False"
+google_client_id=""
+google_client_secret=""
+admin_sso="no"
+sso_show_form="True"   # keep the admin username/password form unless SSO-only is chosen
+google_superuser_list=""
+if yesno "Configure Google SSO? (one Google OAuth app, used for admin and/or user login)" n; then
+	google_client_id="$(ask "Google OAuth client ID")"
+	google_client_secret="$(ask_secret "Google OAuth client secret")"
+	if yesno "Enable Google SSO for USER-facing login?" y; then
+		feature_google_sso="True"
+	fi
+	if yesno "Enable Google SSO for the Django ADMIN login?" n; then
+		admin_sso="yes"
+		google_superuser_list="$(ask "Admin email(s) allowed via SSO (comma-separated)")"
+		if yesno "Make admin SSO-only? (hide the username/password form)" n; then
+			sso_show_form="False"
+		fi
+	fi
+fi
+
+# ---------------------------------------------------------------------------
+# 5c. Login canary (optional, full tier) — synthetic login monitor
+# ---------------------------------------------------------------------------
+enable_canary="no"
+canary_email=""
+canary_password=""
+if [ "$tier" = "full" ]; then
+	say "Login canary (optional)"
+	echo "A synthetic login monitor. Needs a DEDICATED account with NO org/staff"
+	echo "roles and 2FA DISABLED, or the canary container crash-loops."
+	if yesno "Enable the login canary?" n; then
+		enable_canary="yes"
+		canary_email="$(ask "Canary account email")"
+		canary_password="$(ask_secret "Canary account password")"
+	fi
+fi
+
+# ---------------------------------------------------------------------------
 # 6. Reverse proxy variant
 # ---------------------------------------------------------------------------
 say "Reverse proxy"
@@ -182,6 +226,7 @@ if [ "$tier" = "full" ]; then
 	profiles="observability,antivirus"
 fi
 [ "$feature_telegram" = "True" ] && profiles="${profiles:+$profiles,}telegram"
+[ "$enable_canary" = "yes" ] && profiles="${profiles:+$profiles,}canary"
 
 # ---------------------------------------------------------------------------
 # 8. Write .env
@@ -221,6 +266,16 @@ say "Writing $ENV_FILE"
 	echo "FEATURE_TELEGRAM=${feature_telegram}"
 	echo "FEATURE_LLM_EVALUATION=${feature_llm}"
 	echo "FEATURE_ORGANIZATION_CREATION=${feature_org_creation}"
+	echo "FEATURE_GOOGLE_SSO=${feature_google_sso}"
+	if [ -n "$google_client_id" ]; then
+		echo "GOOGLE_SSO_CLIENT_ID=${google_client_id}"
+		echo "GOOGLE_SSO_CLIENT_SECRET=${google_client_secret}"
+	fi
+	if [ "$admin_sso" = "yes" ]; then
+		echo "GOOGLE_SSO_SUPERUSER_LIST=${google_superuser_list}"
+		echo "GOOGLE_SSO_STAFF_LIST=${google_superuser_list}"
+	fi
+	echo "SSO_SHOW_FORM_ON_ADMIN_PAGE=${sso_show_form}"
 	echo ""
 	echo "EMAIL_DRY_RUN=${email_dry_run}"
 	echo "EMAIL_HOST=${email_host}"
@@ -231,6 +286,7 @@ say "Writing $ENV_FILE"
 	echo "DEFAULT_FROM_EMAIL=\"${default_from}\""
 	echo ""
 	echo "TELEGRAM_BOT_TOKEN=${telegram_token}"
+	echo "LLM_DEFAULT_MODEL=${llm_model}"
 	echo "LLM_API_KEY=${llm_api_key}"
 	echo ""
 	echo "STRIPE_SECRET_KEY=${stripe_secret}"
@@ -240,6 +296,11 @@ say "Writing $ENV_FILE"
 	echo ""
 	echo "GRAFANA_ADMIN_USER=admin"
 	echo "GRAFANA_ADMIN_PASSWORD=${grafana_password}"
+	if [ "$enable_canary" = "yes" ]; then
+		echo ""
+		echo "CANARY_EMAIL=${canary_email}"
+		echo "CANARY_PASSWORD=${canary_password}"
+	fi
 	if [ "$tier" = "slim" ]; then
 		echo ""
 		echo "# Slim tuning"
