@@ -76,6 +76,10 @@ say "Choose a tier"
 echo "  slim = core only (~2 vCPU / 4 GB)."
 echo "  full = everything incl. observability + antivirus (8 vCPU / 32 GB)."
 tier="$(ask "Tier (slim/full)" slim)"
+# The tier is only a preset for the per-capability defaults below; every optional
+# service is still individually toggleable, and each one drives BOTH its Compose
+# profile and its matching FEATURE_* flag so .env never needs hand-editing (#19).
+if [ "$tier" = "full" ]; then profile_default="y"; else profile_default="n"; fi
 
 # ---------------------------------------------------------------------------
 # 3. Domains
@@ -110,9 +114,28 @@ if yesno "Configure real SMTP now? (no = console/dry-run for testing)" n; then
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Optional integrations (default: off)
+# 5. Optional services & integrations — each profile drives its feature flag
 # ---------------------------------------------------------------------------
-say "Optional integrations (skip any you don't need)"
+say "Optional services (the tier preset just sets the defaults — toggle freely)"
+
+# Observability stack (Grafana/Prometheus/Loki/Tempo/...). The flag MUST mirror
+# the profile: with FEATURE_OBSERVABILITY=True but no collector running, the
+# backend repeatedly fails to export OTLP to localhost:4318 (#19).
+enable_observability="no"
+feature_observability="False"
+if yesno "Enable the observability stack (Grafana/Prometheus/Loki/Tempo)?" "$profile_default"; then
+	enable_observability="yes"
+	feature_observability="True"
+fi
+
+# ClamAV malware scanning. One decision drives both the antivirus profile and
+# FEATURE_MALWARE_SCAN, available on any tier (#19).
+enable_antivirus="no"
+feature_malware="False"
+if yesno "Enable ClamAV malware scanning?" "$profile_default"; then
+	enable_antivirus="yes"
+	feature_malware="True"
+fi
 
 feature_telegram="False"
 telegram_token=""
@@ -128,11 +151,6 @@ if yesno "Enable LLM questionnaire evaluation?" n; then
 	feature_llm="True"
 	llm_model="$(ask "LLM model (provider/model)" "openai/gpt-4o-mini")"
 	llm_api_key="$(ask_secret "LLM API key")"
-fi
-
-feature_malware="False"
-if [ "$tier" = "full" ] && yesno "Enable ClamAV malware scanning?" y; then
-	feature_malware="True"
 fi
 
 feature_org_creation="True"
@@ -183,15 +201,15 @@ if yesno "Configure Google SSO? (one Google OAuth app, used for admin and/or use
 fi
 
 # ---------------------------------------------------------------------------
-# 5c. Login canary (optional, full tier) — synthetic login monitor
+# 5c. Login canary (optional) — synthetic login monitor scraped by Prometheus
 # ---------------------------------------------------------------------------
 enable_canary="no"
 canary_email=""
 canary_password=""
-if [ "$tier" = "full" ]; then
+if [ "$enable_observability" = "yes" ]; then
 	say "Login canary (optional)"
-	echo "A synthetic login monitor. Needs a DEDICATED account with NO org/staff"
-	echo "roles and 2FA DISABLED, or the canary container crash-loops."
+	echo "A synthetic login monitor (its metrics are scraped by Prometheus). Needs a"
+	echo "DEDICATED account with NO org/staff roles and 2FA DISABLED, or it crash-loops."
 	if yesno "Enable the login canary?" n; then
 		enable_canary="yes"
 		canary_email="$(ask "Canary account email")"
@@ -220,11 +238,10 @@ salt_key="$(gen)"
 db_password="$(gen)"
 grafana_password="$(gen)"
 
-# Compose profiles per tier
+# Compose profiles — one per enabled capability, matching the FEATURE_* flags (#19).
 profiles=""
-if [ "$tier" = "full" ]; then
-	profiles="observability,antivirus"
-fi
+[ "$enable_observability" = "yes" ] && profiles="${profiles:+$profiles,}observability"
+[ "$enable_antivirus" = "yes" ] && profiles="${profiles:+$profiles,}antivirus"
 [ "$feature_telegram" = "True" ] && profiles="${profiles:+$profiles,}telegram"
 [ "$enable_canary" = "yes" ] && profiles="${profiles:+$profiles,}canary"
 
@@ -263,10 +280,15 @@ say "Writing $ENV_FILE"
 	echo "GRAFANA_DOMAIN=${grafana_domain:-grafana.${frontend_domain}}"
 	echo ""
 	echo "FEATURE_MALWARE_SCAN=${feature_malware}"
+	echo "FEATURE_OBSERVABILITY=${feature_observability}"
 	echo "FEATURE_TELEGRAM=${feature_telegram}"
 	echo "FEATURE_LLM_EVALUATION=${feature_llm}"
 	echo "FEATURE_ORGANIZATION_CREATION=${feature_org_creation}"
 	echo "FEATURE_GOOGLE_SSO=${feature_google_sso}"
+	if [ "$enable_observability" = "yes" ]; then
+		# The backend defaults OTLP to localhost:4318; point it at the tempo container.
+		echo "OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4318"
+	fi
 	if [ -n "$google_client_id" ]; then
 		echo "GOOGLE_SSO_CLIENT_ID=${google_client_id}"
 		echo "GOOGLE_SSO_CLIENT_SECRET=${google_client_secret}"
