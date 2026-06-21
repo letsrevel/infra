@@ -1,3 +1,7 @@
+# Cloudflare self-host variant: Revel behind Cloudflare's proxy.
+# Domains are read from .env at load time. setup.sh selects this file
+# when you confirm you are behind Cloudflare.
+
 {
 	# Global options for better performance
 	servers {
@@ -16,16 +20,9 @@
 }
 
 # -------------------------------------------------------
-# Redirect beta and www to root
-# -------------------------------------------------------
-beta.letsrevel.io, www.letsrevel.io {
-	redir https://letsrevel.io{uri} permanent
-}
-
-# -------------------------------------------------------
 # Revel Frontend
 # -------------------------------------------------------
-{$FRONTEND_DOMAIN:letsrevel.io} {
+{$FRONTEND_DOMAIN} {
 	encode zstd gzip
 
 	# --- Security headers (applied to all responses) ---
@@ -102,16 +99,9 @@ beta.letsrevel.io, www.letsrevel.io {
 }
 
 # -------------------------------------------------------
-# Redirect beta-api to api
-# -------------------------------------------------------
-beta-api.letsrevel.io {
-	redir https://api.letsrevel.io{uri} permanent
-}
-
-# -------------------------------------------------------
 # Revel API
 # -------------------------------------------------------
-{$API_DOMAIN:api.letsrevel.io} {
+{$API_DOMAIN} {
 	# --- Security headers (applied to all responses) ---
 	header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 	header X-Content-Type-Options "nosniff"
@@ -129,7 +119,7 @@ beta-api.letsrevel.io {
 	# Single rule covers ALL protected files (protected/file/*, protected/questionnaire_files/*, etc.)
 	handle_path /media/protected/* {
 		# CORS headers for cross-origin fetch (frontend downloads PDFs via fetch API)
-		header Access-Control-Allow-Origin "https://{$FRONTEND_DOMAIN:letsrevel.io}"
+		header Access-Control-Allow-Origin "https://{$FRONTEND_DOMAIN}"
 		header Access-Control-Allow-Credentials "true"
 		header Access-Control-Allow-Methods "GET, OPTIONS"
 		header Access-Control-Allow-Headers "Authorization, Content-Type"
@@ -199,7 +189,7 @@ beta-api.letsrevel.io {
 # -------------------------------------------------------
 # Revel Docs
 # -------------------------------------------------------
-{$DOCS_DOMAIN:docs.letsrevel.io} {
+{$DOCS_DOMAIN} {
 	header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 	encode zstd gzip
 	root * /srv/docs
@@ -218,7 +208,7 @@ beta-api.letsrevel.io {
 # -------------------------------------------------------
 # Revel Grafana
 # -------------------------------------------------------
-{$GRAFANA_DOMAIN:grafana.letsrevel.io} {
+{$GRAFANA_DOMAIN} {
 	header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 	reverse_proxy revel_grafana:3000
 	encode gzip
