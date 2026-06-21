@@ -312,7 +312,7 @@ services:
         max-file: "3"
     command: >
       redis-server
-      --maxmemory 512mb
+      --maxmemory ${REDIS_MAXMEMORY:-512mb}
       --maxmemory-policy allkeys-lru
       --appendonly yes
       --save 900 1

@@ -136,7 +136,15 @@ case $COMMAND in
             echo -e "${RED}WARNING: caddy reload failed — old config is still serving. Fix the Caddyfile and re-run.${NC}"
         fi
         # These don't serve user traffic, so a restart is fine to pick up config.
-        docker compose restart alloy prometheus
+        # Only restart the ones present under the active COMPOSE_PROFILES — on slim
+        # deployments without the observability profile they don't exist, and an
+        # unconditional restart would abort the update (set -e).
+        OBS_SERVICES=$(docker compose config --services 2>/dev/null \
+            | grep -E '^(alloy|prometheus)$' || true)
+        if [ -n "$OBS_SERVICES" ]; then
+            # shellcheck disable=SC2086
+            docker compose restart $OBS_SERVICES
+        fi
         if [ "$CADDY_RELOAD_FAILED" -ne 0 ]; then
             echo -e "${RED}✗ Update incomplete: caddy is still serving the previous config.${NC}"
             exit 1
