@@ -1,31 +1,18 @@
+# Generic self-host variant: no Cloudflare, Caddy is the edge.
+# Domains are read from .env at load time. Default unless behind Cloudflare.
+
 {
-	# Global options for better performance
+	# Global options. No Cloudflare: Caddy is the edge, so {client_ip}
+	# is the direct remote address and standard X-Forwarded-For applies.
+	# Behind another proxy/CDN? Add a trusted_proxies block here.
 	servers {
 		max_header_size 16KB
-
-		# Real client IP behind Cloudflare.
-		# Cloudflare is the only thing in front of us, and it sends the true
-		# visitor IP in `CF-Connecting-IP`. By trusting ONLY Cloudflare's IP
-		# ranges, Caddy resolves `{client_ip}` to the real visitor and ignores
-		# any `CF-Connecting-IP` / `X-Forwarded-For` sent by a non-Cloudflare
-		# peer (so the value cannot be spoofed by hitting the origin directly).
-		# Ranges from https://www.cloudflare.com/ips/ — refresh occasionally.
-		trusted_proxies static 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
-		client_ip_headers Cf-Connecting-Ip
 	}
 }
-
-# -------------------------------------------------------
-# Redirect beta and www to root
-# -------------------------------------------------------
-beta.letsrevel.io, www.letsrevel.io {
-	redir https://letsrevel.io{uri} permanent
-}
-
 # -------------------------------------------------------
 # Revel Frontend
 # -------------------------------------------------------
-{$FRONTEND_DOMAIN:letsrevel.io} {
+{$FRONTEND_DOMAIN} {
 	encode zstd gzip
 
 	# --- Security headers (applied to all responses) ---
@@ -102,16 +89,9 @@ beta.letsrevel.io, www.letsrevel.io {
 }
 
 # -------------------------------------------------------
-# Redirect beta-api to api
-# -------------------------------------------------------
-beta-api.letsrevel.io {
-	redir https://api.letsrevel.io{uri} permanent
-}
-
-# -------------------------------------------------------
 # Revel API
 # -------------------------------------------------------
-{$API_DOMAIN:api.letsrevel.io} {
+{$API_DOMAIN} {
 	# --- Security headers (applied to all responses) ---
 	header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 	header X-Content-Type-Options "nosniff"
@@ -129,7 +109,7 @@ beta-api.letsrevel.io {
 	# Single rule covers ALL protected files (protected/file/*, protected/questionnaire_files/*, etc.)
 	handle_path /media/protected/* {
 		# CORS headers for cross-origin fetch (frontend downloads PDFs via fetch API)
-		header Access-Control-Allow-Origin "https://{$FRONTEND_DOMAIN:letsrevel.io}"
+		header Access-Control-Allow-Origin "https://{$FRONTEND_DOMAIN}"
 		header Access-Control-Allow-Credentials "true"
 		header Access-Control-Allow-Methods "GET, OPTIONS"
 		header Access-Control-Allow-Headers "Authorization, Content-Type"
@@ -199,7 +179,7 @@ beta-api.letsrevel.io {
 # -------------------------------------------------------
 # Revel Docs
 # -------------------------------------------------------
-{$DOCS_DOMAIN:docs.letsrevel.io} {
+{$DOCS_DOMAIN} {
 	header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 	encode zstd gzip
 	root * /srv/docs
@@ -218,7 +198,7 @@ beta-api.letsrevel.io {
 # -------------------------------------------------------
 # Revel Grafana
 # -------------------------------------------------------
-{$GRAFANA_DOMAIN:grafana.letsrevel.io} {
+{$GRAFANA_DOMAIN} {
 	header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 	reverse_proxy revel_grafana:3000
 	encode gzip
