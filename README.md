@@ -4,6 +4,11 @@
 
 This repository contains the complete infrastructure configuration for the Revel project, including all services, observability stack, and reverse proxy setup.
 
+> **Self-hosting Revel?** Clone this repo and run **`./setup.sh`** — an interactive
+> wizard that takes a fresh VPS to a running instance (slim ~2 vCPU/4 GB, or the full
+> stack). Full walkthrough: **https://docs.letsrevel.io/self-hosting**.
+> The sections below document our own production deployment and the repo mechanics.
+
 ---
 
 ## 🔗 Related Repositories
@@ -89,13 +94,24 @@ Key variables to configure:
 
 ### Domain Configuration
 
-The Caddyfile is configured for the following domains:
-- `beta.letsrevel.io` - Frontend application
-- `beta-api.letsrevel.io` - Backend API
-- `flower.letsrevel.io` - Celery monitoring
-- `grafana.letsrevel.io` - Grafana dashboard
+Domains are parameterized via `.env` (`FRONTEND_DOMAIN`, `API_DOMAIN`, `DOCS_DOMAIN`,
+`GRAFANA_DOMAIN`) and consumed by the Caddyfile. Three Caddyfile variants ship:
 
-Update the Caddyfile if you need to change domains or add new ones.
+- `Caddyfile` — Cloudflare-aware + legacy redirects (**production default**)
+- `Caddyfile.cloudflare` — self-host behind Cloudflare's proxy
+- `Caddyfile.generic` — self-host with Caddy as the edge (no Cloudflare)
+
+Select a variant with `CADDYFILE_PATH` in `.env` (the wizard sets it). The defaults in
+`Caddyfile` resolve to the production domains, so production needs no `.env` change.
+DNS setup and the Cloudflare orange-cloud caveat are documented at
+https://docs.letsrevel.io/self-hosting.
+
+### Optional services (Compose profiles)
+
+The core (web, frontend, celery, beat, postgres, pgbouncer, redis) always runs.
+Observability, antivirus (ClamAV), and the Telegram bot are gated behind Compose
+profiles via `COMPOSE_PROFILES` in `.env` (e.g. `observability,antivirus,telegram`).
+An empty value runs the slim core only.
 
 ## Directory Structure
 

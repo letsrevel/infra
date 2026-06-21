@@ -1,0 +1,22 @@
+Revel geo-data attribution
+==========================
+
+This directory hosts third-party geographic datasets that Revel redistributes
+under their respective open licenses. If you self-host Revel and serve these
+files (e.g. at /geo-data/), you must keep this NOTICE alongside them.
+
+--------------------------------------------------------------------------
+worldcities.csv  /  worldcities.mini.csv
+--------------------------------------------------------------------------
+World Cities Database by Pareto Software, LLC (simplemaps.com).
+Basic database, licensed under Creative Commons Attribution 4.0 (CC BY 4.0).
+Source: https://simplemaps.com/data/world-cities
+License: https://creativecommons.org/licenses/by/4.0/
+
+--------------------------------------------------------------------------
+IP2LOCATION-LITE-DB5.BIN
+--------------------------------------------------------------------------
+This site or product includes IP2Location LITE data available from
+https://lite.ip2location.com.
+Licensed under Creative Commons Attribution-ShareAlike 4.0 (CC BY-SA 4.0).
+License: https://creativecommons.org/licenses/by-sa/4.0/
