@@ -518,10 +518,31 @@ if [ "$feature_stripe" = "yes" ] && command -v jq >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
-# 13. Next steps
+# 13. First-run admin + organization (interactive)
+# ---------------------------------------------------------------------------
+# bootstrap_admin prompts for the admin email/password and first org, pins the
+# username to the email (matching public-API accounts), and prints the URLs.
+admin_created="no"
+if docker compose ps web 2>/dev/null | grep -q "healthy"; then
+	if yesno "Create the admin user and first organization now?" y; then
+		if docker compose exec web python manage.py bootstrap_admin; then
+			admin_created="yes"
+		else
+			warn "Admin bootstrap did not complete — re-run it any time with:"
+			warn "  docker compose exec web python manage.py bootstrap_admin"
+		fi
+	fi
+else
+	warn "The web service is not healthy yet; skipping admin creation. Check 'docker compose logs web'."
+fi
+
+# ---------------------------------------------------------------------------
+# 14. Next steps
 # ---------------------------------------------------------------------------
 say "Done. Next steps:"
-echo "  - Create an admin user:  docker compose exec web python manage.py createsuperuser"
+if [ "$admin_created" != "yes" ]; then
+	echo "  - Create the admin + first org:  docker compose exec web python manage.py bootstrap_admin"
+fi
 echo "  - Frontend:              https://${frontend_domain}"
 echo "  - API:                   https://${api_domain}"
 if [ "$tier" = "full" ]; then
