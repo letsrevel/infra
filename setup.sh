@@ -35,6 +35,26 @@ yesno() {
 }
 gen() { openssl rand -hex 32; }
 
+# Host resource detection (Linux). Empty if unavailable (e.g. non-Linux dev box),
+# in which case the wizard silently skips the fit checks.
+HOST_CPUS=""
+HOST_MEM_MB=""
+command -v nproc >/dev/null 2>&1 && HOST_CPUS="$(nproc)"
+[ -r /proc/meminfo ] && HOST_MEM_MB="$(awk '/^MemTotal:/ {printf "%d", $2/1024}' /proc/meminfo)"
+
+# Convert a docker-style size (e.g. 1500m, 12g, 512M, 2G) to whole MB; 0 on parse failure.
+to_mb() {
+	local v="$1" n unit
+	n="$(printf '%s' "$v" | tr -cd '0-9.')"
+	unit="$(printf '%s' "$v" | tr -d '0-9.' | tr 'A-Z' 'a-z')"
+	[ -n "$n" ] || { echo 0; return; }
+	case "$unit" in
+		g|gb) awk "BEGIN{printf \"%d\", $n*1024}" ;;
+		m|mb|"") awk "BEGIN{printf \"%d\", $n}" ;;
+		*) echo 0 ;;
+	esac
+}
+
 # ---------------------------------------------------------------------------
 # 1. Preflight
 # ---------------------------------------------------------------------------
@@ -73,9 +93,27 @@ fi
 # 2. Tier
 # ---------------------------------------------------------------------------
 say "Choose a tier"
+if [ -n "$HOST_CPUS" ] && [ -n "$HOST_MEM_MB" ]; then
+	echo "Detected host: ${HOST_CPUS} vCPU, ${HOST_MEM_MB} MB RAM."
+fi
 echo "  slim = core only (~2 vCPU / 4 GB)."
 echo "  full = everything incl. observability + antivirus (8 vCPU / 32 GB)."
-tier="$(ask "Tier (slim/full)" slim)"
+# Recommend a tier from the detected hardware (full only when the box is clearly big).
+recommended_tier="slim"
+if [ -n "$HOST_CPUS" ] && [ -n "$HOST_MEM_MB" ] && [ "$HOST_CPUS" -ge 8 ] && [ "$HOST_MEM_MB" -ge 24000 ]; then
+	recommended_tier="full"
+fi
+tier="$(ask "Tier (slim/full)" "$recommended_tier")"
+# Warn when the chosen tier doesn't fit the detected hardware.
+if [ -n "$HOST_CPUS" ] && [ -n "$HOST_MEM_MB" ]; then
+	if [ "$tier" = "full" ] && { [ "$HOST_CPUS" -lt 8 ] || [ "$HOST_MEM_MB" -lt 24000 ]; }; then
+		warn "'full' targets ~8 vCPU / 32 GB but this host has ${HOST_CPUS} vCPU / ${HOST_MEM_MB} MB. The observability stack alone needs several GB — 'slim' is the safer choice."
+		yesno "Continue with 'full' anyway?" n || tier="slim"
+	fi
+	if [ "$tier" = "slim" ] && { [ "$HOST_CPUS" -lt 2 ] || [ "$HOST_MEM_MB" -lt 3500 ]; }; then
+		warn "Even 'slim' wants ~2 vCPU / 4 GB; this host has ${HOST_CPUS} vCPU / ${HOST_MEM_MB} MB. Expect OOM kills or sluggishness."
+	fi
+fi
 # The tier is only a preset for the per-capability defaults below; every optional
 # service is still individually toggleable, and each one drives BOTH its Compose
 # profile and its matching FEATURE_* flag so .env never needs hand-editing (#19).
@@ -87,10 +125,8 @@ if [ "$tier" = "full" ]; then profile_default="y"; else profile_default="n"; fi
 say "Domains"
 frontend_domain="$(ask "Frontend domain" "example.com")"
 api_domain="$(ask "API domain" "api.${frontend_domain}")"
-docs_domain=""
 grafana_domain=""
 if [ "$tier" = "full" ]; then
-	docs_domain="$(ask "Docs domain" "docs.${frontend_domain}")"
 	grafana_domain="$(ask "Grafana domain" "grafana.${frontend_domain}")"
 fi
 
@@ -230,6 +266,76 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 6b. Resource limits & tuning — tier-suggested, fully overridable
+# ---------------------------------------------------------------------------
+# Pick the per-tier suggestions, then let the user review/override each value.
+# These are written explicitly to .env for BOTH tiers so they are easy to tweak
+# later. CPU caps must never exceed the host CPU count or Docker refuses to start
+# the container (the full defaults — web 6.0 / celery 4.0 — are invalid on a 2-vCPU
+# slim box, which is why slim suggests lower values).
+say "Resource limits & tuning"
+if [ "$tier" = "slim" ]; then
+	web_cpu="2";          celery_cpu="1.5"
+	web_mem="1500m";      celery_mem="768m";    frontend_mem="512m"
+	redis_mem="256m";     redis_maxmem="200mb"
+	gunicorn_workers="2"; gunicorn_threads="2"; celery_concurrency="2"
+	pg_shared="256MB";    pg_cache="1GB";       pg_maint="128MB"
+	pg_work="8MB";        pg_maxconn="50"
+else
+	web_cpu="6.0";        celery_cpu="4.0"
+	web_mem="12g";        celery_mem="8g";      frontend_mem="2g"
+	redis_mem="1g";       redis_maxmem="512mb"
+	gunicorn_workers="6"; gunicorn_threads="4"; celery_concurrency="4"
+	pg_shared="4GB";      pg_cache="16GB";      pg_maint="1GB"
+	pg_work="32MB";       pg_maxconn="100"
+fi
+# Fit the suggested CPU caps to the detected host so they're always valid (a cap
+# above the host CPU count makes Docker refuse to create the container). On a 2-vCPU
+# box the slim suggestions already fit; this also rescues a 'full' choice on a
+# smaller box and any odd core count.
+if [ -n "$HOST_CPUS" ]; then
+	awk "BEGIN{exit !($web_cpu > $HOST_CPUS)}" && web_cpu="$HOST_CPUS"
+	awk "BEGIN{exit !($celery_cpu > $HOST_CPUS)}" && celery_cpu="$HOST_CPUS"
+fi
+echo "Suggested values for the '${tier}' tier are shown in [brackets]."
+if yesno "Review / override the suggested CPU, memory and tuning values?" n; then
+	echo "Press Enter to accept each suggestion, or type a new value."
+	web_cpu="$(ask "web CPU limit (cores; must be <= host CPUs)" "$web_cpu")"
+	celery_cpu="$(ask "celery CPU limit (cores; must be <= host CPUs)" "$celery_cpu")"
+	web_mem="$(ask "web memory limit" "$web_mem")"
+	celery_mem="$(ask "celery memory limit" "$celery_mem")"
+	frontend_mem="$(ask "frontend memory limit" "$frontend_mem")"
+	redis_mem="$(ask "redis container memory limit" "$redis_mem")"
+	redis_maxmem="$(ask "redis maxmemory (keep below the redis memory limit)" "$redis_maxmem")"
+	gunicorn_workers="$(ask "gunicorn workers" "$gunicorn_workers")"
+	gunicorn_threads="$(ask "gunicorn threads" "$gunicorn_threads")"
+	celery_concurrency="$(ask "celery concurrency" "$celery_concurrency")"
+	pg_shared="$(ask "postgres shared_buffers" "$pg_shared")"
+	pg_cache="$(ask "postgres effective_cache_size" "$pg_cache")"
+	pg_maint="$(ask "postgres maintenance_work_mem" "$pg_maint")"
+	pg_work="$(ask "postgres work_mem" "$pg_work")"
+	pg_maxconn="$(ask "postgres max_connections" "$pg_maxconn")"
+fi
+
+# Re-validate after any override: a CPU cap above the host CPU count makes Docker
+# refuse to create the container ("range of CPUs is from 0.01 to N.00").
+if [ -n "$HOST_CPUS" ]; then
+	for cpu in "$web_cpu" "$celery_cpu"; do
+		if awk "BEGIN{exit !($cpu > $HOST_CPUS)}" 2>/dev/null; then
+			warn "CPU limit ${cpu} exceeds this host's ${HOST_CPUS} CPUs — Docker will refuse to start that container. Lower WEB_CPU_LIMIT / CELERY_CPU_LIMIT in ${ENV_FILE}."
+		fi
+	done
+fi
+# Advisory memory-budget check: sum the capped containers (postgres is uncapped, so
+# leave headroom) and warn if it overcommits RAM. Observability adds several GB more.
+if [ -n "$HOST_MEM_MB" ]; then
+	budget_mb=$(( $(to_mb "$web_mem") + $(to_mb "$celery_mem") + $(to_mb "$frontend_mem") + $(to_mb "$redis_mem") ))
+	if [ "$budget_mb" -gt 0 ] && [ "$budget_mb" -ge "$HOST_MEM_MB" ]; then
+		warn "Capped containers alone request ~${budget_mb} MB but the host has ${HOST_MEM_MB} MB (and postgres is uncapped on top). Lower the *_MEM_LIMIT values in ${ENV_FILE} or pick a smaller tier."
+	fi
+fi
+
+# ---------------------------------------------------------------------------
 # 7. Secrets
 # ---------------------------------------------------------------------------
 say "Generating secrets"
@@ -276,8 +382,11 @@ say "Writing $ENV_FILE"
 	echo ""
 	echo "FRONTEND_DOMAIN=${frontend_domain}"
 	echo "API_DOMAIN=${api_domain}"
-	echo "DOCS_DOMAIN=${docs_domain:-docs.${frontend_domain}}"
-	echo "GRAFANA_DOMAIN=${grafana_domain:-grafana.${frontend_domain}}"
+	# GRAFANA_DOMAIN only when observability runs; otherwise the Caddyfile's
+	# {$GRAFANA_DOMAIN:grafana.localhost} default keeps the block inert (no ACME).
+	if [ "$enable_observability" = "yes" ]; then
+		echo "GRAFANA_DOMAIN=${grafana_domain:-grafana.${frontend_domain}}"
+	fi
 	echo ""
 	echo "FEATURE_MALWARE_SCAN=${feature_malware}"
 	echo "FEATURE_OBSERVABILITY=${feature_observability}"
@@ -323,23 +432,24 @@ say "Writing $ENV_FILE"
 		echo "CANARY_EMAIL=${canary_email}"
 		echo "CANARY_PASSWORD=${canary_password}"
 	fi
-	if [ "$tier" = "slim" ]; then
-		echo ""
-		echo "# Slim tuning"
-		echo "PG_SHARED_BUFFERS=256MB"
-		echo "PG_EFFECTIVE_CACHE_SIZE=1GB"
-		echo "PG_MAINTENANCE_WORK_MEM=128MB"
-		echo "PG_WORK_MEM=8MB"
-		echo "PG_MAX_CONNECTIONS=50"
-		echo "WEB_MEM_LIMIT=1500m"
-		echo "CELERY_MEM_LIMIT=768m"
-		echo "FRONTEND_MEM_LIMIT=512m"
-		echo "REDIS_MEM_LIMIT=256m"
-		echo "REDIS_MAXMEMORY=200mb"
-		echo "GUNICORN_WORKERS=2"
-		echo "GUNICORN_THREADS=2"
-		echo "CELERY_CONCURRENCY=2"
-	fi
+	echo ""
+	echo "# Resource limits & tuning (${tier}-tier suggestions; edit to re-size)."
+	echo "# CPU caps must not exceed the host's CPU count or Docker won't start the container."
+	echo "PG_SHARED_BUFFERS=${pg_shared}"
+	echo "PG_EFFECTIVE_CACHE_SIZE=${pg_cache}"
+	echo "PG_MAINTENANCE_WORK_MEM=${pg_maint}"
+	echo "PG_WORK_MEM=${pg_work}"
+	echo "PG_MAX_CONNECTIONS=${pg_maxconn}"
+	echo "WEB_MEM_LIMIT=${web_mem}"
+	echo "CELERY_MEM_LIMIT=${celery_mem}"
+	echo "FRONTEND_MEM_LIMIT=${frontend_mem}"
+	echo "REDIS_MEM_LIMIT=${redis_mem}"
+	echo "REDIS_MAXMEMORY=${redis_maxmem}"
+	echo "WEB_CPU_LIMIT=${web_cpu}"
+	echo "CELERY_CPU_LIMIT=${celery_cpu}"
+	echo "GUNICORN_WORKERS=${gunicorn_workers}"
+	echo "GUNICORN_THREADS=${gunicorn_threads}"
+	echo "CELERY_CONCURRENCY=${celery_concurrency}"
 } >"$ENV_FILE"
 
 # ---------------------------------------------------------------------------

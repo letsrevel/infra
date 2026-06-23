@@ -177,28 +177,14 @@
 }
 
 # -------------------------------------------------------
-# Revel Docs
+# Revel Grafana (observability tier only)
 # -------------------------------------------------------
-{$DOCS_DOMAIN} {
-	header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-	encode zstd gzip
-	root * /srv/docs
-	file_server
-
-	# Cache static assets aggressively
-	@static {
-		path *.js *.css *.woff2 *.png *.jpg *.jpeg *.svg *.ico
-	}
-	header @static Cache-Control "public, max-age=86400"
-
-	# Short cache for HTML pages
-	header Cache-Control "public, max-age=300, stale-while-revalidate=60"
-}
-
-# -------------------------------------------------------
-# Revel Grafana
-# -------------------------------------------------------
-{$GRAFANA_DOMAIN} {
+# Gated by the env default: when GRAFANA_DOMAIN is unset (slim / no observability
+# profile) this resolves to an internal .localhost address that Caddy serves with
+# its own CA — no public ACME attempt, no Let's Encrypt rate-limit risk, and it is
+# inert since nothing routes to it. Set GRAFANA_DOMAIN to a real hostname only when
+# you run the observability profile.
+{$GRAFANA_DOMAIN:grafana.localhost} {
 	header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 	reverse_proxy revel_grafana:3000
 	encode gzip
