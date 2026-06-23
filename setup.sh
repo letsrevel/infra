@@ -374,7 +374,10 @@ say "Writing $ENV_FILE"
 	echo "REDIS_HOST=redis"
 	echo "REDIS_PORT=6379"
 	echo ""
-	echo "ALLOWED_HOSTS=${frontend_domain},${api_domain}"
+	# `web` is required: the frontend's SSR calls hit the API over the internal
+	# network as http://web:8000, so Django sees Host: web. localhost/127.0.0.1
+	# cover the container healthcheck. Without these, requests 400 (DisallowedHost).
+	echo "ALLOWED_HOSTS=${frontend_domain},${api_domain},web,localhost,127.0.0.1"
 	echo "SITE_DOMAIN=${api_domain}"
 	echo "BASE_URL=https://${api_domain}"
 	echo "FRONTEND_BASE_URL=https://${frontend_domain}"
