@@ -487,8 +487,8 @@ services:
       - ./observability/alertmanager-entrypoint.sh:/entrypoint.sh:ro
       - alertmanager_data:/alertmanager
     environment:
-      PUSHOVER_USER_KEY: ${PUSHOVER_USER_KEY}
-      PUSHOVER_APP_TOKEN: ${PUSHOVER_APP_TOKEN}
+      PUSHOVER_USER_KEY: ${PUSHOVER_USER_KEY:-}
+      PUSHOVER_APP_TOKEN: ${PUSHOVER_APP_TOKEN:-}
     expose:
       - "9093"
     networks:
@@ -602,8 +602,8 @@ services:
       - ./canary/login_canary.py:/app/login_canary.py:ro
     environment:
       CANARY_BASE_URL: ${CANARY_BASE_URL:-https://letsrevel.io}
-      CANARY_EMAIL: ${CANARY_EMAIL}
-      CANARY_PASSWORD: ${CANARY_PASSWORD}
+      CANARY_EMAIL: ${CANARY_EMAIL:-}
+      CANARY_PASSWORD: ${CANARY_PASSWORD:-}
       CANARY_INTERVAL: ${CANARY_INTERVAL:-600}
     expose:
       - "8080"
