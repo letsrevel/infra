@@ -76,7 +76,7 @@ services:
       resources:
         limits:
           memory: ${WEB_MEM_LIMIT:-12g}
-          cpus: '6.0'
+          cpus: ${WEB_CPU_LIMIT:-6.0}
 
   celery_default:
     image: ghcr.io/letsrevel/revel:latest
@@ -112,7 +112,7 @@ services:
       resources:
         limits:
           memory: ${CELERY_MEM_LIMIT:-8g}
-          cpus: '4.0'
+          cpus: ${CELERY_CPU_LIMIT:-4.0}
 
   beat:
     image: ghcr.io/letsrevel/revel:latest

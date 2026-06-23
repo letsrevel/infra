@@ -30,7 +30,6 @@ This is a consolidated Docker Compose setup that includes:
 - **Frontend** - Next.js/SvelteKit frontend application
 - **Celery Workers** - Background task processing (default queue)
 - **Beat** - Celery scheduler for periodic tasks
-- **Flower** - Celery monitoring UI
 - **Telegram Bot** - Telegram bot service
 
 ### Infrastructure Services
@@ -88,7 +87,7 @@ All configuration is done through the `.env` file. See `.env.example` for all av
 Key variables to configure:
 - Database credentials (`DB_*`)
 - Django secret key (`SECRET_KEY`)
-- Google SSO for Flower (`GOOGLE_SSO_*`)
+- Google SSO for the Django admin login (`GOOGLE_SSO_*`)
 - Grafana admin credentials (`GRAFANA_ADMIN_*`)
 - Pushover notifications (`PUSHOVER_USER_KEY`, `PUSHOVER_APP_TOKEN`)
 
@@ -199,7 +198,6 @@ Revel is deployed on a **Hetzner CCX33** instance:
 4. Ensure DNS records point to your server:
    - beta.letsrevel.io
    - beta-api.letsrevel.io
-   - flower.letsrevel.io
    - grafana.letsrevel.io
 5. Start services: `docker compose up -d`
 6. Caddy will automatically provision SSL certificates
@@ -298,7 +296,6 @@ See the `Caddyfile` in this repository for the correct production configuration.
 
 Access monitoring tools:
 - Grafana: https://grafana.letsrevel.io
-- Flower (Celery): https://flower.letsrevel.io
 - Prometheus (metrics): Available internally at `revel_prometheus:9090`
 
 ## Maintenance
