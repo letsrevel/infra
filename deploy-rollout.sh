@@ -9,6 +9,10 @@ NC='\033[0m' # No Color
 
 cd "$(dirname "$0")"
 
+# Discord deploy-notification helpers (best-effort, never fail the deploy).
+# shellcheck source=notify-discord.sh
+source "./notify-discord.sh"
+
 # Install docker-rollout if not present
 install_rollout() {
     if [ -f ~/.docker/cli-plugins/docker-rollout ]; then
@@ -74,6 +78,12 @@ deploy() {
     docker compose up -d --force-recreate telegram
 
     echo -e "${GREEN}Deploy complete!${NC}"
+
+    # Announce the live versions on Discord (no-op without webhook URLs). This
+    # script doesn't load .env, so pull the webhook vars from it explicitly.
+    _load_discord_env
+    notify_deploy "${DISCORD_BACKEND_WEBHOOK_URL:-}" "🚀" "Backend" "$(get_backend_version)" 5763719
+    notify_deploy "${DISCORD_FRONTEND_WEBHOOK_URL:-}" "🎨" "Frontend" "$(get_frontend_version)" 5793266
 }
 
 # Show usage

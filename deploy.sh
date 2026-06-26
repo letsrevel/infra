@@ -7,6 +7,11 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Discord deploy-notification helpers (best-effort, never fail the deploy).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=notify-discord.sh
+source "$SCRIPT_DIR/notify-discord.sh"
+
 echo -e "${GREEN}Revel Infrastructure Deployment${NC}"
 echo "=================================="
 echo ""
@@ -150,6 +155,9 @@ case $COMMAND in
             exit 1
         fi
         echo -e "${GREEN}✓ Services updated${NC}"
+        # Announce the live versions on Discord (no-op without webhook URLs).
+        notify_deploy "${DISCORD_BACKEND_WEBHOOK_URL:-}" "🚀" "Backend" "$(get_backend_version)" 5763719
+        notify_deploy "${DISCORD_FRONTEND_WEBHOOK_URL:-}" "🎨" "Frontend" "$(get_frontend_version)" 5793266
         ;;
 
     backup)
