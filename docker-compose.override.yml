@@ -10,7 +10,21 @@
 # with ENOTFOUND. host-gateway makes the container resolve it the same way the
 # host does (straight back to Caddy on the host's published 80/443).
 services:
+  # Point at images built locally from the DuRock RJ fork's source (branch
+  # `customization` in revel-backend/revel-frontend) instead of the upstream
+  # project's published ghcr.io images, so branding/code edits actually show
+  # up here. Rebuild after pulling new changes with e.g.:
+  #   docker build -t revel-backend:local ../revel-backend
+  #   docker build -t revel-frontend:local ../revel-frontend
+  #   docker compose -p infra up -d
+  web:
+    image: revel-backend:local
+  celery_default:
+    image: revel-backend:local
+  beat:
+    image: revel-backend:local
   frontend:
+    image: revel-frontend:local
     extra_hosts:
       - "revel.local:host-gateway"
       - "api.revel.local:host-gateway"
@@ -31,3 +45,19 @@ services:
       - ./local-ca/root.crt:/caddy-ca/root.crt:ro,z
     environment:
       - NODE_EXTRA_CA_CERTS=/caddy-ca/root.crt
+
+  # SELinux is enforcing on this host and every bind-mounted host path here
+  # was `unlabeled_t` (never relabeled for container access) — Caddy crash-
+  # looped with "permission denied" on Caddyfile the moment it got recreated
+  # (`docker compose up -d` recreates it too since it isn't pinned to only
+  # the services we changed). Re-declaring the same mounts with `:z` fixes
+  # it; Compose merges volumes by target path, so this replaces the base
+  # file's entries rather than duplicating them.
+  caddy:
+    volumes:
+      - ${CADDYFILE_PATH:-./Caddyfile}:/etc/caddy/Caddyfile:z
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./media:/srv/revel_media:z
+      - ./docs/site:/srv/docs:ro,z
+      - ./geo-data:/srv/geo-data:ro,z
