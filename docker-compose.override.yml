@@ -1,0 +1,33 @@
+# Local-only override, NOT part of the tracked production config.
+# Docker Compose auto-merges this file when present alongside docker-compose.yml.
+#
+# The frontend container calls PUBLIC_API_URL directly from routes that bypass
+# SvelteKit's handleFetch rewrite (e.g. src/routes/api/auth/refresh/+server.ts,
+# which uses the generated API client's own fetch, not the event-scoped one).
+# In production that URL is a real public domain, resolvable from anywhere. In
+# this local setup it's revel.local/api.revel.local, which only exists in the
+# HOST's /etc/hosts — Docker's internal DNS doesn't see it, so those calls fail
+# with ENOTFOUND. host-gateway makes the container resolve it the same way the
+# host does (straight back to Caddy on the host's published 80/443).
+services:
+  frontend:
+    extra_hosts:
+      - "revel.local:host-gateway"
+      - "api.revel.local:host-gateway"
+    # Caddy issues *.revel.local certs from its own internal CA (there's no
+    # public ACME for a fake local TLD). Node rejects that cert by default
+    # (UNABLE_TO_GET_ISSUER_CERT_LOCALLY) on the auth-refresh route's direct
+    # fetch to PUBLIC_API_URL. Trust it explicitly instead of disabling TLS
+    # verification wholesale. Bind-mounting the extracted root.crt (world-
+    # readable) rather than the caddy_data volume directly — the volume's
+    # files are root:root 600 and unreadable by the frontend's non-root user.
+    #
+    # ./local-ca/ is gitignored (regenerated per-instance) — recreate it with:
+    #   mkdir -p local-ca && docker cp revel_caddy:/data/caddy/pki/authorities/local/root.crt local-ca/root.crt && chmod 644 local-ca/root.crt
+    volumes:
+      # :z relabels the bind mount for SELinux (enforcing on this host) so the
+      # container's non-root user can actually read it — without it Node sees
+      # EACCES even though host-side permissions are 644.
+      - ./local-ca/root.crt:/caddy-ca/root.crt:ro,z
+    environment:
+      - NODE_EXTRA_CA_CERTS=/caddy-ca/root.crt

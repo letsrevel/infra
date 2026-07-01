@@ -15,6 +15,10 @@ sentinel/*
 certs/*
 !certs/.gitkeep
 
+# Extracted Caddy internal CA root cert (regenerated per-instance via
+# `docker cp` from the caddy container — see docker-compose.override.yml)
+local-ca/
+
 # Backup files
 *.bak
 *.backup
