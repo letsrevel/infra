@@ -9,7 +9,7 @@
 		# ranges, Caddy resolves `{client_ip}` to the real visitor and ignores
 		# any `CF-Connecting-IP` / `X-Forwarded-For` sent by a non-Cloudflare
 		# peer (so the value cannot be spoofed by hitting the origin directly).
-		# Ranges from https://www.cloudflare.com/ips/ — refresh occasionally.
+		# Ranges from https://www.cloudflare.com/ips/ — maintained by update-cloudflare-ips.sh.
 		trusted_proxies static {
 			import cloudflare_ips.conf
 		}

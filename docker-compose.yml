@@ -18,7 +18,7 @@ services:
       # Self-hosters NOT behind Cloudflare set CADDYFILE_PATH=./Caddyfile.generic
       # in .env (the wizard does this automatically).
       - ${CADDYFILE_PATH:-./Caddyfile}:/etc/caddy/Caddyfile
-      - ./cloudflare_ips.conf:/etc/caddy/cloudflare_ips.conf
+      - ./cloudflare_ips.conf:/etc/caddy/cloudflare_ips.conf:ro
       - caddy_data:/data
       - caddy_config:/config
       - ./media:/srv/revel_media

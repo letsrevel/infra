@@ -8,7 +8,7 @@ set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONF_FILE="$SCRIPT_DIR/cloudflare_ips.conf"
-TEMP_FILE=$(mktemp)
+TEMP_FILE=$(mktemp "$SCRIPT_DIR/cloudflare_ips.XXXXXX")
 
 # Cleanup on exit
 trap 'rm -f "$TEMP_FILE"' EXIT
@@ -37,6 +37,14 @@ if [ -z "$ALL_IPS" ]; then
     exit 0
 fi
 
+# Sanity check: Ensure list is not truncated (minimum 15 lines)
+LINE_COUNT=$(echo "$ALL_IPS" | wc -l)
+if [ "$LINE_COUNT" -lt 15 ]; then
+    echo "Warning: Fetched IP list is too small ($LINE_COUNT lines, minimum 15 required) (non-fatal)." >&2
+    echo "Keeping existing cloudflare_ips.conf."
+    exit 0
+fi
+
 # Write to temp file
 echo "$ALL_IPS" > "$TEMP_FILE"
 
@@ -45,7 +53,7 @@ if [ -f "$CONF_FILE" ] && cmp -s "$CONF_FILE" "$TEMP_FILE"; then
     echo "Cloudflare IP ranges are already up-to-date."
 else
     echo "Updating Cloudflare IP ranges in $CONF_FILE..."
-    cp "$TEMP_FILE" "$CONF_FILE"
+    mv "$TEMP_FILE" "$CONF_FILE"
     chmod 644 "$CONF_FILE"
 
     # Reload Caddy if the stack is running
