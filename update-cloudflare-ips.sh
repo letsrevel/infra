@@ -3,7 +3,8 @@
 # Fetches latest Cloudflare IP ranges and updates cloudflare_ips.conf.
 # Reloads Caddy if it is currently running.
 #
-set -euo pipefail
+set -eu
+set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONF_FILE="$SCRIPT_DIR/cloudflare_ips.conf"
@@ -16,21 +17,24 @@ echo "Fetching Cloudflare IP ranges..."
 
 # Fetch IPv4 and IPv6 lists
 if ! IPS_V4=$(curl -fsSL --connect-timeout 10 --max-time 20 https://www.cloudflare.com/ips-v4); then
-    echo "Error: Failed to fetch Cloudflare IPv4 ranges." >&2
-    exit 1
+    echo "Warning: Failed to fetch Cloudflare IPv4 ranges (non-fatal)." >&2
+    echo "Keeping existing cloudflare_ips.conf."
+    exit 0
 fi
 
 if ! IPS_V6=$(curl -fsSL --connect-timeout 10 --max-time 20 https://www.cloudflare.com/ips-v6); then
-    echo "Error: Failed to fetch Cloudflare IPv6 ranges." >&2
-    exit 1
+    echo "Warning: Failed to fetch Cloudflare IPv6 ranges (non-fatal)." >&2
+    echo "Keeping existing cloudflare_ips.conf."
+    exit 0
 fi
 
-# Combine and clean up (remove empty lines)
-ALL_IPS=$(echo -e "${IPS_V4}\n${IPS_V6}" | grep -E '^[0-9a-fA-F.:/]+$')
+# Combine and clean up (remove empty lines). Use || true to prevent set -e failing on grep.
+ALL_IPS=$(echo -e "${IPS_V4}\n${IPS_V6}" | grep -E '^[0-9a-fA-F.:/]+$' || true)
 
 if [ -z "$ALL_IPS" ]; then
-    echo "Error: Fetched IP list is empty or invalid." >&2
-    exit 1
+    echo "Warning: Fetched IP list is empty or invalid (non-fatal)." >&2
+    echo "Keeping existing cloudflare_ips.conf."
+    exit 0
 fi
 
 # Write to temp file

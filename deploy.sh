@@ -80,7 +80,9 @@ case $COMMAND in
     up)
         echo -e "${YELLOW}Starting services...${NC}"
         if [ -x "$SCRIPT_DIR/update-cloudflare-ips.sh" ]; then
-            "$SCRIPT_DIR/update-cloudflare-ips.sh"
+            if ! "$SCRIPT_DIR/update-cloudflare-ips.sh"; then
+                echo -e "${YELLOW}Warning: Cloudflare IP refresh failed. Proceeding with existing cloudflare_ips.conf (non-fatal).${NC}" >&2
+            fi
         fi
         docker compose up -d
         echo ""
@@ -129,7 +131,9 @@ case $COMMAND in
     update)
         echo -e "${YELLOW}Updating services...${NC}"
         if [ -x "$SCRIPT_DIR/update-cloudflare-ips.sh" ]; then
-            "$SCRIPT_DIR/update-cloudflare-ips.sh"
+            if ! "$SCRIPT_DIR/update-cloudflare-ips.sh"; then
+                echo -e "${YELLOW}Warning: Cloudflare IP refresh failed. Proceeding with existing cloudflare_ips.conf (non-fatal).${NC}" >&2
+            fi
         fi
         docker compose pull
         docker compose up -d
