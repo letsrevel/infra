@@ -489,6 +489,9 @@ fi
 # 11. Bring up
 # ---------------------------------------------------------------------------
 say "Starting the stack"
+if [ -x "./update-cloudflare-ips.sh" ]; then
+	./update-cloudflare-ips.sh
+fi
 docker compose up -d
 
 say "Waiting for the web service to become healthy..."

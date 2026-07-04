@@ -79,6 +79,9 @@ COMMAND=${1:-up}
 case $COMMAND in
     up)
         echo -e "${YELLOW}Starting services...${NC}"
+        if [ -x "$SCRIPT_DIR/update-cloudflare-ips.sh" ]; then
+            "$SCRIPT_DIR/update-cloudflare-ips.sh"
+        fi
         docker compose up -d
         echo ""
         echo -e "${GREEN}✓ Services started${NC}"
@@ -125,6 +128,9 @@ case $COMMAND in
 
     update)
         echo -e "${YELLOW}Updating services...${NC}"
+        if [ -x "$SCRIPT_DIR/update-cloudflare-ips.sh" ]; then
+            "$SCRIPT_DIR/update-cloudflare-ips.sh"
+        fi
         docker compose pull
         docker compose up -d
         # `docker compose up -d` only recreates a container when its image or
