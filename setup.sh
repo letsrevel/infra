@@ -159,9 +159,13 @@ say "Optional services (the tier preset just sets the defaults — toggle freely
 # backend repeatedly fails to export OTLP to localhost:4318 (#19).
 enable_observability="no"
 feature_observability="False"
+enable_profiling="no"
 if yesno "Enable the observability stack (Grafana/Prometheus/Loki/Tempo)?" "$profile_default"; then
 	enable_observability="yes"
 	feature_observability="True"
+	if yesno "Enable continuous profiling (Pyroscope/Alloy)?" "$profile_default"; then
+		enable_profiling="yes"
+	fi
 fi
 
 # ClamAV malware scanning. One decision drives both the antivirus profile and
@@ -281,6 +285,12 @@ if [ "$tier" = "slim" ]; then
 	gunicorn_workers="2"; gunicorn_threads="2"; celery_concurrency="2"
 	pg_shared="256MB";    pg_cache="1GB";       pg_maint="128MB"
 	pg_work="8MB";        pg_maxconn="50"
+	prom_mem="512m";      prom_cpu="0.5"
+	loki_mem="512m";      loki_cpu="0.5"
+	tempo_mem="256m";     tempo_cpu="0.5"
+	grafana_mem="512m";   grafana_cpu="0.5"
+	pyroscope_mem="256m"; pyroscope_cpu="0.5"
+	alloy_mem="256m";     alloy_cpu="0.25"
 else
 	web_cpu="6.0";        celery_cpu="4.0"
 	web_mem="12g";        celery_mem="8g";      frontend_mem="2g"
@@ -288,6 +298,12 @@ else
 	gunicorn_workers="6"; gunicorn_threads="4"; celery_concurrency="4"
 	pg_shared="4GB";      pg_cache="16GB";      pg_maint="1GB"
 	pg_work="32MB";       pg_maxconn="100"
+	prom_mem="2g";        prom_cpu="1.0"
+	loki_mem="1g";        loki_cpu="2.0"
+	tempo_mem="512m";     tempo_cpu="2.0"
+	grafana_mem="2g";     grafana_cpu="1.0"
+	pyroscope_mem="512m"; pyroscope_cpu="2.0"
+	alloy_mem="512m";     alloy_cpu="1.0"
 fi
 # Fit the suggested CPU caps to the detected host so they're always valid (a cap
 # above the host CPU count makes Docker refuse to create the container). On a 2-vCPU
@@ -296,6 +312,12 @@ fi
 if [ -n "$HOST_CPUS" ]; then
 	awk "BEGIN{exit !($web_cpu > $HOST_CPUS)}" && web_cpu="$HOST_CPUS"
 	awk "BEGIN{exit !($celery_cpu > $HOST_CPUS)}" && celery_cpu="$HOST_CPUS"
+	awk "BEGIN{exit !($prom_cpu > $HOST_CPUS)}" && prom_cpu="$HOST_CPUS"
+	awk "BEGIN{exit !($loki_cpu > $HOST_CPUS)}" && loki_cpu="$HOST_CPUS"
+	awk "BEGIN{exit !($tempo_cpu > $HOST_CPUS)}" && tempo_cpu="$HOST_CPUS"
+	awk "BEGIN{exit !($grafana_cpu > $HOST_CPUS)}" && grafana_cpu="$HOST_CPUS"
+	awk "BEGIN{exit !($pyroscope_cpu > $HOST_CPUS)}" && pyroscope_cpu="$HOST_CPUS"
+	awk "BEGIN{exit !($alloy_cpu > $HOST_CPUS)}" && alloy_cpu="$HOST_CPUS"
 fi
 echo "Suggested values for the '${tier}' tier are shown in [brackets]."
 if yesno "Review / override the suggested CPU, memory and tuning values?" n; then
@@ -315,14 +337,30 @@ if yesno "Review / override the suggested CPU, memory and tuning values?" n; the
 	pg_maint="$(ask "postgres maintenance_work_mem" "$pg_maint")"
 	pg_work="$(ask "postgres work_mem" "$pg_work")"
 	pg_maxconn="$(ask "postgres max_connections" "$pg_maxconn")"
+	if [ "$enable_observability" = "yes" ]; then
+		prom_cpu="$(ask "prometheus CPU limit" "$prom_cpu")"
+		prom_mem="$(ask "prometheus memory limit" "$prom_mem")"
+		loki_cpu="$(ask "loki CPU limit" "$loki_cpu")"
+		loki_mem="$(ask "loki memory limit" "$loki_mem")"
+		tempo_cpu="$(ask "tempo CPU limit" "$tempo_cpu")"
+		tempo_mem="$(ask "tempo memory limit" "$tempo_mem")"
+		grafana_cpu="$(ask "grafana CPU limit" "$grafana_cpu")"
+		grafana_mem="$(ask "grafana memory limit" "$grafana_mem")"
+	fi
+	if [ "$enable_profiling" = "yes" ]; then
+		pyroscope_cpu="$(ask "pyroscope CPU limit" "$pyroscope_cpu")"
+		pyroscope_mem="$(ask "pyroscope memory limit" "$pyroscope_mem")"
+		alloy_cpu="$(ask "alloy CPU limit" "$alloy_cpu")"
+		alloy_mem="$(ask "alloy memory limit" "$alloy_mem")"
+	fi
 fi
 
 # Re-validate after any override: a CPU cap above the host CPU count makes Docker
 # refuse to create the container ("range of CPUs is from 0.01 to N.00").
 if [ -n "$HOST_CPUS" ]; then
-	for cpu in "$web_cpu" "$celery_cpu"; do
+	for cpu in "$web_cpu" "$celery_cpu" "$prom_cpu" "$loki_cpu" "$tempo_cpu" "$grafana_cpu" "$pyroscope_cpu" "$alloy_cpu"; do
 		if awk "BEGIN{exit !($cpu > $HOST_CPUS)}" 2>/dev/null; then
-			warn "CPU limit ${cpu} exceeds this host's ${HOST_CPUS} CPUs — Docker will refuse to start that container. Lower WEB_CPU_LIMIT / CELERY_CPU_LIMIT in ${ENV_FILE}."
+			warn "CPU limit ${cpu} exceeds this host's ${HOST_CPUS} CPUs — Docker will refuse to start that container. Lower CPU limit variables in ${ENV_FILE}."
 		fi
 	done
 fi
@@ -330,6 +368,12 @@ fi
 # leave headroom) and warn if it overcommits RAM. Observability adds several GB more.
 if [ -n "$HOST_MEM_MB" ]; then
 	budget_mb=$(( $(to_mb "$web_mem") + $(to_mb "$celery_mem") + $(to_mb "$frontend_mem") + $(to_mb "$redis_mem") ))
+	if [ "$enable_observability" = "yes" ]; then
+		budget_mb=$(( budget_mb + $(to_mb "$prom_mem") + $(to_mb "$loki_mem") + $(to_mb "$tempo_mem") + $(to_mb "$grafana_mem") ))
+	fi
+	if [ "$enable_profiling" = "yes" ]; then
+		budget_mb=$(( budget_mb + $(to_mb "$pyroscope_mem") + $(to_mb "$alloy_mem") ))
+	fi
 	if [ "$budget_mb" -gt 0 ] && [ "$budget_mb" -ge "$HOST_MEM_MB" ]; then
 		warn "Capped containers alone request ~${budget_mb} MB but the host has ${HOST_MEM_MB} MB (and postgres is uncapped on top). Lower the *_MEM_LIMIT values in ${ENV_FILE} or pick a smaller tier."
 	fi
@@ -347,6 +391,7 @@ grafana_password="$(gen)"
 # Compose profiles — one per enabled capability, matching the FEATURE_* flags (#19).
 profiles=""
 [ "$enable_observability" = "yes" ] && profiles="${profiles:+$profiles,}observability"
+[ "$enable_profiling" = "yes" ] && profiles="${profiles:+$profiles,}profiling"
 [ "$enable_antivirus" = "yes" ] && profiles="${profiles:+$profiles,}antivirus"
 [ "$feature_telegram" = "True" ] && profiles="${profiles:+$profiles,}telegram"
 [ "$enable_canary" = "yes" ] && profiles="${profiles:+$profiles,}canary"
@@ -453,6 +498,19 @@ say "Writing $ENV_FILE"
 	echo "GUNICORN_WORKERS=${gunicorn_workers}"
 	echo "GUNICORN_THREADS=${gunicorn_threads}"
 	echo "CELERY_CONCURRENCY=${celery_concurrency}"
+	echo ""
+	echo "PROMETHEUS_MEM_LIMIT=${prom_mem}"
+	echo "PROMETHEUS_CPU_LIMIT=${prom_cpu}"
+	echo "LOKI_MEM_LIMIT=${loki_mem}"
+	echo "LOKI_CPU_LIMIT=${loki_cpu}"
+	echo "TEMPO_MEM_LIMIT=${tempo_mem}"
+	echo "TEMPO_CPU_LIMIT=${tempo_cpu}"
+	echo "GRAFANA_MEM_LIMIT=${grafana_mem}"
+	echo "GRAFANA_CPU_LIMIT=${grafana_cpu}"
+	echo "PYROSCOPE_MEM_LIMIT=${pyroscope_mem}"
+	echo "PYROSCOPE_CPU_LIMIT=${pyroscope_cpu}"
+	echo "ALLOY_MEM_LIMIT=${alloy_mem}"
+	echo "ALLOY_CPU_LIMIT=${alloy_cpu}"
 } >"$ENV_FILE"
 
 # ---------------------------------------------------------------------------

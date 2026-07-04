@@ -394,8 +394,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1g
-          cpus: '2.0'
+          memory: ${LOKI_MEM_LIMIT:-1g}
+          cpus: ${LOKI_CPU_LIMIT:-2.0}
 
   tempo:
     image: grafana/tempo:2.5.0
@@ -426,8 +426,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512m
-          cpus: '2.0'
+          memory: ${TEMPO_MEM_LIMIT:-512m}
+          cpus: ${TEMPO_CPU_LIMIT:-2.0}
 
   prometheus:
     image: prom/prometheus:v2.53.0
@@ -464,8 +464,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2g
-          cpus: '1.0'
+          memory: ${PROMETHEUS_MEM_LIMIT:-2g}
+          cpus: ${PROMETHEUS_CPU_LIMIT:-1.0}
 
   alertmanager:
     image: prom/alertmanager:v0.27.0
@@ -617,7 +617,7 @@ services:
 
   pyroscope:
     image: grafana/pyroscope:1.9.0
-    profiles: ["observability"]
+    profiles: ["profiling"]
     container_name: revel_pyroscope
     restart: always
     logging:
@@ -636,12 +636,12 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512m
-          cpus: '2.0'
+          memory: ${PYROSCOPE_MEM_LIMIT:-512m}
+          cpus: ${PYROSCOPE_CPU_LIMIT:-2.0}
 
   alloy:
     image: grafana/alloy:latest
-    profiles: ["observability"]
+    profiles: ["profiling"]
     container_name: revel_alloy
     restart: always
     privileged: true
@@ -680,8 +680,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512m
-          cpus: '1.0'
+          memory: ${ALLOY_MEM_LIMIT:-512m}
+          cpus: ${ALLOY_CPU_LIMIT:-1.0}
 
   grafana:
     image: grafana/grafana:11.1.0
@@ -718,8 +718,6 @@ services:
         condition: service_healthy
       prometheus:
         condition: service_healthy
-      pyroscope:
-        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health"]
       interval: 10s
@@ -728,8 +726,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2g
-          cpus: '1.0'
+          memory: ${GRAFANA_MEM_LIMIT:-2g}
+          cpus: ${GRAFANA_CPU_LIMIT:-1.0}
 
   # ============================================================================
   # Security
