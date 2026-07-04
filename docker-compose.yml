@@ -370,7 +370,7 @@ services:
 
   loki:
     image: grafana/loki:3.0.0
-    profiles: ["observability"]
+    profiles: ["observability", "profiling"]
     container_name: revel_loki
     restart: always
     logging:
