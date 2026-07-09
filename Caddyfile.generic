@@ -22,6 +22,16 @@
 	header Permissions-Policy "camera=(), microphone=(), usb=()"
 	header Cross-Origin-Opener-Policy "same-origin-allow-popups"
 
+	# --- Drop common vuln-scanner probes at the edge ---
+	# Bots hammer nonexistent PHP shells and exposed dotfiles (/.env, /.git/*).
+	# SvelteKit turned these into 404s logged as SSR errors, which tripped the
+	# FrontendSSRErrors alert. Answer them here so they never reach the Node SSR
+	# process. `.well-known/*` is intentionally NOT matched (it is legitimate).
+	@scanner_probe path *.php *.phtml *.asp *.aspx *.jsp *.cgi /.env* /.git* /.svn* /.hg* /.DS_Store /wp-* /wordpress*
+	handle @scanner_probe {
+		respond 404
+	}
+
 	# Optional: short cache for SSR HTML
 	@html {
 		path / /index.html
