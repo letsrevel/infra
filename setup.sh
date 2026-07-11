@@ -126,9 +126,6 @@ say "Domains"
 frontend_domain="$(ask "Frontend domain" "example.com")"
 api_domain="$(ask "API domain" "api.${frontend_domain}")"
 grafana_domain=""
-if [ "$tier" = "full" ]; then
-	grafana_domain="$(ask "Grafana domain" "grafana.${frontend_domain}")"
-fi
 
 # ---------------------------------------------------------------------------
 # 4. Email
@@ -163,6 +160,7 @@ enable_profiling="no"
 if yesno "Enable the observability stack (Grafana/Prometheus/Loki/Tempo)?" "$profile_default"; then
 	enable_observability="yes"
 	feature_observability="True"
+	grafana_domain="$(ask "Grafana domain" "grafana.${frontend_domain}")"
 	if yesno "Enable continuous profiling (Pyroscope/Alloy)?" "$profile_default"; then
 		enable_profiling="yes"
 	fi
@@ -291,6 +289,7 @@ if [ "$tier" = "slim" ]; then
 	grafana_mem="512m";   grafana_cpu="0.5"
 	pyroscope_mem="256m"; pyroscope_cpu="0.5"
 	alloy_mem="256m";     alloy_cpu="0.25"
+	alloy_profiling_mem="256m"; alloy_profiling_cpu="0.25"
 else
 	web_cpu="6.0";        celery_cpu="4.0"
 	web_mem="12g";        celery_mem="8g";      frontend_mem="2g"
@@ -304,6 +303,7 @@ else
 	grafana_mem="2g";     grafana_cpu="1.0"
 	pyroscope_mem="512m"; pyroscope_cpu="2.0"
 	alloy_mem="512m";     alloy_cpu="1.0"
+	alloy_profiling_mem="512m"; alloy_profiling_cpu="1.0"
 fi
 # Fit the suggested CPU caps to the detected host so they're always valid (a cap
 # above the host CPU count makes Docker refuse to create the container). On a 2-vCPU
@@ -318,6 +318,7 @@ if [ -n "$HOST_CPUS" ]; then
 	awk "BEGIN{exit !($grafana_cpu > $HOST_CPUS)}" && grafana_cpu="$HOST_CPUS"
 	awk "BEGIN{exit !($pyroscope_cpu > $HOST_CPUS)}" && pyroscope_cpu="$HOST_CPUS"
 	awk "BEGIN{exit !($alloy_cpu > $HOST_CPUS)}" && alloy_cpu="$HOST_CPUS"
+	awk "BEGIN{exit !($alloy_profiling_cpu > $HOST_CPUS)}" && alloy_profiling_cpu="$HOST_CPUS"
 fi
 echo "Suggested values for the '${tier}' tier are shown in [brackets]."
 if yesno "Review / override the suggested CPU, memory and tuning values?" n; then
@@ -351,16 +352,33 @@ if yesno "Review / override the suggested CPU, memory and tuning values?" n; the
 		pyroscope_cpu="$(ask "pyroscope CPU limit" "$pyroscope_cpu")"
 		pyroscope_mem="$(ask "pyroscope memory limit" "$pyroscope_mem")"
 	fi
-	if [ "$enable_observability" = "yes" ] || [ "$enable_profiling" = "yes" ]; then
+	if [ "$enable_observability" = "yes" ]; then
 		alloy_cpu="$(ask "alloy CPU limit" "$alloy_cpu")"
 		alloy_mem="$(ask "alloy memory limit" "$alloy_mem")"
+	fi
+	if [ "$enable_profiling" = "yes" ]; then
+		alloy_profiling_cpu="$(ask "alloy profiling CPU limit" "$alloy_profiling_cpu")"
+		alloy_profiling_mem="$(ask "alloy profiling memory limit" "$alloy_profiling_mem")"
 	fi
 fi
 
 # Re-validate after any override: a CPU cap above the host CPU count makes Docker
 # refuse to create the container ("range of CPUs is from 0.01 to N.00").
 if [ -n "$HOST_CPUS" ]; then
-	for cpu in "$web_cpu" "$celery_cpu" "$prom_cpu" "$loki_cpu" "$tempo_cpu" "$grafana_cpu" "$pyroscope_cpu" "$alloy_cpu"; do
+	cpus_to_check="$web_cpu $celery_cpu"
+	if [ "$enable_observability" = "yes" ]; then
+		cpus_to_check="$cpus_to_check $prom_cpu $loki_cpu $tempo_cpu $grafana_cpu"
+	fi
+	if [ "$enable_profiling" = "yes" ]; then
+		cpus_to_check="$cpus_to_check $pyroscope_cpu"
+	fi
+	if [ "$enable_observability" = "yes" ]; then
+		cpus_to_check="$cpus_to_check $alloy_cpu"
+	fi
+	if [ "$enable_profiling" = "yes" ]; then
+		cpus_to_check="$cpus_to_check $alloy_profiling_cpu"
+	fi
+	for cpu in $cpus_to_check; do
 		if awk "BEGIN{exit !($cpu > $HOST_CPUS)}" 2>/dev/null; then
 			warn "CPU limit ${cpu} exceeds this host's ${HOST_CPUS} CPUs — Docker will refuse to start that container. Lower CPU limit variables in ${ENV_FILE}."
 		fi
@@ -376,8 +394,11 @@ if [ -n "$HOST_MEM_MB" ]; then
 	if [ "$enable_profiling" = "yes" ]; then
 		budget_mb=$(( budget_mb + $(to_mb "$pyroscope_mem") ))
 	fi
-	if [ "$enable_observability" = "yes" ] || [ "$enable_profiling" = "yes" ]; then
+	if [ "$enable_observability" = "yes" ]; then
 		budget_mb=$(( budget_mb + $(to_mb "$alloy_mem") ))
+	fi
+	if [ "$enable_profiling" = "yes" ]; then
+		budget_mb=$(( budget_mb + $(to_mb "$alloy_profiling_mem") ))
 	fi
 	if [ "$budget_mb" -gt 0 ] && [ "$budget_mb" -ge "$HOST_MEM_MB" ]; then
 		warn "Capped containers alone request ~${budget_mb} MB but the host has ${HOST_MEM_MB} MB (and postgres is uncapped on top). Lower the *_MEM_LIMIT values in ${ENV_FILE} or pick a smaller tier."
@@ -516,6 +537,8 @@ say "Writing $ENV_FILE"
 	echo "PYROSCOPE_CPU_LIMIT=${pyroscope_cpu}"
 	echo "ALLOY_MEM_LIMIT=${alloy_mem}"
 	echo "ALLOY_CPU_LIMIT=${alloy_cpu}"
+	echo "ALLOY_PROFILING_MEM_LIMIT=${alloy_profiling_mem}"
+	echo "ALLOY_PROFILING_CPU_LIMIT=${alloy_profiling_cpu}"
 } >"$ENV_FILE"
 
 # ---------------------------------------------------------------------------
@@ -611,7 +634,7 @@ if [ "$admin_created" != "yes" ]; then
 fi
 echo "  - Frontend:              https://${frontend_domain}"
 echo "  - API:                   https://${api_domain}"
-if [ "$tier" = "full" ]; then
+if [ "$enable_observability" = "yes" ]; then
 	echo "  - Grafana:               https://${grafana_domain:-grafana.${frontend_domain}} (admin / see ${ENV_FILE})"
 fi
 if [ "$behind_cloudflare" = "yes" ]; then
