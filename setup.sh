@@ -350,6 +350,8 @@ if yesno "Review / override the suggested CPU, memory and tuning values?" n; the
 	if [ "$enable_profiling" = "yes" ]; then
 		pyroscope_cpu="$(ask "pyroscope CPU limit" "$pyroscope_cpu")"
 		pyroscope_mem="$(ask "pyroscope memory limit" "$pyroscope_mem")"
+	fi
+	if [ "$enable_observability" = "yes" ] || [ "$enable_profiling" = "yes" ]; then
 		alloy_cpu="$(ask "alloy CPU limit" "$alloy_cpu")"
 		alloy_mem="$(ask "alloy memory limit" "$alloy_mem")"
 	fi
@@ -372,7 +374,10 @@ if [ -n "$HOST_MEM_MB" ]; then
 		budget_mb=$(( budget_mb + $(to_mb "$prom_mem") + $(to_mb "$loki_mem") + $(to_mb "$tempo_mem") + $(to_mb "$grafana_mem") ))
 	fi
 	if [ "$enable_profiling" = "yes" ]; then
-		budget_mb=$(( budget_mb + $(to_mb "$pyroscope_mem") + $(to_mb "$alloy_mem") ))
+		budget_mb=$(( budget_mb + $(to_mb "$pyroscope_mem") ))
+	fi
+	if [ "$enable_observability" = "yes" ] || [ "$enable_profiling" = "yes" ]; then
+		budget_mb=$(( budget_mb + $(to_mb "$alloy_mem") ))
 	fi
 	if [ "$budget_mb" -gt 0 ] && [ "$budget_mb" -ge "$HOST_MEM_MB" ]; then
 		warn "Capped containers alone request ~${budget_mb} MB but the host has ${HOST_MEM_MB} MB (and postgres is uncapped on top). Lower the *_MEM_LIMIT values in ${ENV_FILE} or pick a smaller tier."
