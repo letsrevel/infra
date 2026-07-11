@@ -10,9 +10,7 @@
 		# any `CF-Connecting-IP` / `X-Forwarded-For` sent by a non-Cloudflare
 		# peer (so the value cannot be spoofed by hitting the origin directly).
 		# Ranges from https://www.cloudflare.com/ips/ — maintained by update-cloudflare-ips.sh.
-		trusted_proxies static {
-			import cloudflare_ips.conf
-		}
+		import cloudflare_ips.conf
 		client_ip_headers Cf-Connecting-Ip
 	}
 }

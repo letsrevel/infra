@@ -45,15 +45,17 @@ if [ "$LINE_COUNT" -lt 15 ]; then
     exit 0
 fi
 
-# Write to temp file
-echo "$ALL_IPS" > "$TEMP_FILE"
+# Format to single-line trusted_proxies static directive
+IP_LIST=$(echo "$ALL_IPS" | tr '\n' ' ' | xargs)
+echo "trusted_proxies static $IP_LIST" > "$TEMP_FILE"
 
 # Compare and update if changed
 if [ -f "$CONF_FILE" ] && cmp -s "$CONF_FILE" "$TEMP_FILE"; then
     echo "Cloudflare IP ranges are already up-to-date."
 else
     echo "Updating Cloudflare IP ranges in $CONF_FILE..."
-    mv "$TEMP_FILE" "$CONF_FILE"
+    # Write in-place (cat redirection) instead of mv to preserve Docker bind-mount inode.
+    cat "$TEMP_FILE" > "$CONF_FILE"
     chmod 644 "$CONF_FILE"
 
     # Reload Caddy if the stack is running
