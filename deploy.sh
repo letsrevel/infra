@@ -79,8 +79,9 @@ COMMAND=${1:-up}
 case $COMMAND in
     up)
         echo -e "${YELLOW}Starting services...${NC}"
-        if [ -x "$SCRIPT_DIR/update-cloudflare-ips.sh" ]; then
-            if ! "$SCRIPT_DIR/update-cloudflare-ips.sh"; then
+        # Only refresh IPs if we are configured to use Cloudflare proxy
+        if [ "${CADDYFILE_PATH:-}" != "./Caddyfile.generic" ] && [ -f "$SCRIPT_DIR/update-cloudflare-ips.sh" ]; then
+            if ! bash "$SCRIPT_DIR/update-cloudflare-ips.sh"; then
                 echo -e "${YELLOW}Warning: Cloudflare IP refresh failed. Proceeding with existing cloudflare_ips.conf (non-fatal).${NC}" >&2
             fi
         fi
@@ -130,8 +131,9 @@ case $COMMAND in
 
     update)
         echo -e "${YELLOW}Updating services...${NC}"
-        if [ -x "$SCRIPT_DIR/update-cloudflare-ips.sh" ]; then
-            if ! "$SCRIPT_DIR/update-cloudflare-ips.sh"; then
+        # Only refresh IPs if we are configured to use Cloudflare proxy
+        if [ "${CADDYFILE_PATH:-}" != "./Caddyfile.generic" ] && [ -f "$SCRIPT_DIR/update-cloudflare-ips.sh" ]; then
+            if ! bash "$SCRIPT_DIR/update-cloudflare-ips.sh"; then
                 echo -e "${YELLOW}Warning: Cloudflare IP refresh failed. Proceeding with existing cloudflare_ips.conf (non-fatal).${NC}" >&2
             fi
         fi
