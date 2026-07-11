@@ -682,7 +682,15 @@ services:
     profiles: ["profiling"]
     container_name: revel_alloy_profiling
     restart: always
-    privileged: true
+    cap_add:
+      - BPF
+      - PERFMON
+      - SYS_PTRACE
+      - SYS_RESOURCE
+      - DAC_READ_SEARCH
+      - CHECKPOINT_RESTORE
+      - SYSLOG
+      - SYS_ADMIN
     pid: host
     logging:
       driver: "json-file"
@@ -692,6 +700,7 @@ services:
     volumes:
       - ./observability/alloy-profiling-config.alloy:/etc/alloy/config.alloy:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys/kernel/tracing:/sys/kernel/tracing:ro
       - alloy_profiling_data:/var/lib/alloy
     environment:
       - DEPLOYMENT_ENVIRONMENT=${DEPLOYMENT_ENVIRONMENT:-production}
