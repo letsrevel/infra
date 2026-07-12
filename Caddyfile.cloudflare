@@ -32,6 +32,14 @@
 	header Permissions-Policy "camera=(), microphone=(), usb=()"
 	header Cross-Origin-Opener-Policy "same-origin-allow-popups"
 
+	# Public brand assets (og-image, logos, icons) must be embeddable
+	# cross-origin: social-preview tools and og:image/og:logo consumers load
+	# them via <img> from their own origin, and CORP "same-origin" makes
+	# browsers block exactly that (issue #32). Everything else keeps the
+	# strict default above.
+	@shareable_asset path /og-*.png /logo* /favicon* /apple-touch-icon* /revel-email-logo*
+	header @shareable_asset Cross-Origin-Resource-Policy "cross-origin"
+
 	# --- Drop common vuln-scanner probes at the edge ---
 	# Bots hammer nonexistent PHP shells and exposed dotfiles (/.env, /.git/*).
 	# SvelteKit turned these into 404s logged as SSR errors, which tripped the
