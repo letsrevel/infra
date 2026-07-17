@@ -12,6 +12,9 @@ cd "$(dirname "$0")"
 # Discord deploy-notification helpers (best-effort, never fail the deploy).
 # shellcheck source=notify-discord.sh
 source "./notify-discord.sh"
+# Image-change detection (IMAGE_BACKEND/IMAGE_FRONTEND, image_id).
+# shellcheck source=image-diff.sh
+source "./image-diff.sh"
 
 # Install docker-rollout if not present
 install_rollout() {
@@ -59,31 +62,65 @@ migrate() {
 deploy() {
     echo -e "${YELLOW}=== ZERO-DOWNTIME DEPLOY ===${NC}"
 
+    # Snapshot image IDs, pull, snapshot again: only roll out a component whose
+    # image actually moved. `docker rollout` / `--force-recreate` recreate
+    # containers unconditionally, so gating here is what saves the needless churn.
+    local old_backend old_frontend new_backend new_frontend
+    old_backend=$(image_id "$IMAGE_BACKEND")
+    old_frontend=$(image_id "$IMAGE_FRONTEND")
+
     echo -e "${YELLOW}Pulling latest images...${NC}"
     docker compose pull web frontend celery_default beat telegram
 
-    echo -e "${YELLOW}Rolling out web...${NC}"
-    docker rollout -t 120 web
+    new_backend=$(image_id "$IMAGE_BACKEND")
+    new_frontend=$(image_id "$IMAGE_FRONTEND")
 
-    echo -e "${YELLOW}Rolling out frontend...${NC}"
-    docker rollout -t 120 frontend
+    local backend_changed=0 frontend_changed=0
+    [ "$old_backend" != "$new_backend" ] && backend_changed=1
+    [ "$old_frontend" != "$new_frontend" ] && frontend_changed=1
 
-    echo -e "${YELLOW}Rolling out celery_default...${NC}"
-    docker rollout -t 120 celery_default
+    if [ "$backend_changed" -eq 0 ] && [ "$frontend_changed" -eq 0 ]; then
+        echo -e "${GREEN}No new images — nothing to deploy.${NC}"
+        return 0
+    fi
 
-    echo -e "${YELLOW}Restarting beat (cannot run two instances)...${NC}"
-    docker compose up -d --force-recreate beat
+    # Backend image backs web, celery_default, beat and telegram — gate them all
+    # on the single backend-image check.
+    if [ "$backend_changed" -eq 1 ]; then
+        echo -e "${YELLOW}Rolling out web...${NC}"
+        docker rollout -t 120 web
 
-    echo -e "${YELLOW}Restarting telegram (cannot run two instances)...${NC}"
-    docker compose up -d --force-recreate telegram
+        echo -e "${YELLOW}Rolling out celery_default...${NC}"
+        docker rollout -t 120 celery_default
+
+        echo -e "${YELLOW}Restarting beat (cannot run two instances)...${NC}"
+        docker compose up -d --force-recreate beat
+
+        echo -e "${YELLOW}Restarting telegram (cannot run two instances)...${NC}"
+        docker compose up -d --force-recreate telegram
+    else
+        echo -e "${GREEN}Backend image unchanged — skipping web/celery_default/beat/telegram.${NC}"
+    fi
+
+    if [ "$frontend_changed" -eq 1 ]; then
+        echo -e "${YELLOW}Rolling out frontend...${NC}"
+        docker rollout -t 120 frontend
+    else
+        echo -e "${GREEN}Frontend image unchanged — skipping frontend.${NC}"
+    fi
 
     echo -e "${GREEN}Deploy complete!${NC}"
 
     # Announce the live versions on Discord (no-op without webhook URLs). This
     # script doesn't load .env, so pull the webhook vars from it explicitly.
+    # Only announce components that were actually rolled out.
     _load_discord_env
-    notify_deploy "${DISCORD_BACKEND_WEBHOOK_URL:-}" "🚀" "Backend" "$(get_backend_version)" 5763719
-    notify_deploy "${DISCORD_FRONTEND_WEBHOOK_URL:-}" "🎨" "Frontend" "$(get_frontend_version)" 5793266
+    if [ "$backend_changed" -eq 1 ]; then
+        notify_deploy "${DISCORD_BACKEND_WEBHOOK_URL:-}" "🚀" "Backend" "$(get_backend_version)" 5763719
+    fi
+    if [ "$frontend_changed" -eq 1 ]; then
+        notify_deploy "${DISCORD_FRONTEND_WEBHOOK_URL:-}" "🎨" "Frontend" "$(get_frontend_version)" 5793266
+    fi
 }
 
 # Show usage

@@ -11,6 +11,9 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=notify-discord.sh
 source "$SCRIPT_DIR/notify-discord.sh"
+# Image-change detection (IMAGE_BACKEND/IMAGE_FRONTEND, image_id).
+# shellcheck source=image-diff.sh
+source "$SCRIPT_DIR/image-diff.sh"
 
 echo -e "${GREEN}Revel Infrastructure Deployment${NC}"
 echo "=================================="
@@ -125,7 +128,15 @@ case $COMMAND in
 
     update)
         echo -e "${YELLOW}Updating services...${NC}"
+        # Snapshot image IDs across the pull so we only announce a component
+        # whose image actually changed. `docker compose up -d` already recreates
+        # just the containers whose image/spec moved, so recreation needs no
+        # gating here — only the Discord notifications below do.
+        OLD_BACKEND_IMAGE_ID=$(image_id "$IMAGE_BACKEND")
+        OLD_FRONTEND_IMAGE_ID=$(image_id "$IMAGE_FRONTEND")
         docker compose pull
+        NEW_BACKEND_IMAGE_ID=$(image_id "$IMAGE_BACKEND")
+        NEW_FRONTEND_IMAGE_ID=$(image_id "$IMAGE_FRONTEND")
         docker compose up -d
         # `docker compose up -d` only recreates a container when its image or
         # compose spec changes — NOT when an edited *mounted config file* changes.
@@ -156,8 +167,13 @@ case $COMMAND in
         fi
         echo -e "${GREEN}✓ Services updated${NC}"
         # Announce the live versions on Discord (no-op without webhook URLs).
-        notify_deploy "${DISCORD_BACKEND_WEBHOOK_URL:-}" "🚀" "Backend" "$(get_backend_version)" 5763719
-        notify_deploy "${DISCORD_FRONTEND_WEBHOOK_URL:-}" "🎨" "Frontend" "$(get_frontend_version)" 5793266
+        # Only announce a component whose image actually changed in this update.
+        if [ "$OLD_BACKEND_IMAGE_ID" != "$NEW_BACKEND_IMAGE_ID" ]; then
+            notify_deploy "${DISCORD_BACKEND_WEBHOOK_URL:-}" "🚀" "Backend" "$(get_backend_version)" 5763719
+        fi
+        if [ "$OLD_FRONTEND_IMAGE_ID" != "$NEW_FRONTEND_IMAGE_ID" ]; then
+            notify_deploy "${DISCORD_FRONTEND_WEBHOOK_URL:-}" "🎨" "Frontend" "$(get_frontend_version)" 5793266
+        fi
         ;;
 
     backup)
