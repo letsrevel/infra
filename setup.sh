@@ -489,6 +489,11 @@ fi
 # 11. Bring up
 # ---------------------------------------------------------------------------
 say "Starting the stack"
+if [ "$behind_cloudflare" = "yes" ] && [ -f "./update-cloudflare-ips.sh" ]; then
+	if ! bash ./update-cloudflare-ips.sh; then
+		warn "Cloudflare IP refresh failed. Proceeding with existing cloudflare_ips.conf."
+	fi
+fi
 docker compose up -d
 
 say "Waiting for the web service to become healthy..."
