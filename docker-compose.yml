@@ -4,7 +4,10 @@ services:
   # ============================================================================
 
   caddy:
-    image: caddy:latest
+    # Pinned: caddy sits in the request path, and `latest` meant a routine
+    # `docker compose pull` could jump it a major version mid-deploy. Bump
+    # deliberately, in its own window — never alongside an app release.
+    image: caddy:2.11.4
     container_name: revel_caddy
     restart: always
     ports:
@@ -259,7 +262,10 @@ services:
       retries: 5
 
   pgbouncer:
-    image: edoburu/pgbouncer
+    # Pinned, and previously untagged entirely — every pull silently took
+    # whatever `latest` pointed at, for the pooler every DB connection goes
+    # through. Same reasoning as caddy above: bump deliberately.
+    image: edoburu/pgbouncer:v1.25.2-p0
     restart: always
     container_name: revel_pgbouncer
     logging:
