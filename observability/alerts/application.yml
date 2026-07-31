@@ -114,6 +114,45 @@ groups:
           description: "{{ $value | humanizePercentage }} of all responses are 429s (and >1/s) over 5m — broad throttling. Likely a shared Cloudflare-edge-IP bucket hitting real users, or abuse (note: a single aggressive client can also trip this — confirm via per-IP logs). Triage runbook: docs/runbooks/rate-limit-429s.md"
 
       # ========================================================================
+      # Money-Correctness Alerts (Stripe)
+      #
+      # These fire on a SINGLE occurrence — each increment means a real person
+      # may have paid for something we did not issue, and recovery is manual and
+      # time-sensitive. No `for:` delay; severity=critical so Pushover uses
+      # emergency priority (bypasses quiet hours, requires acknowledgment,
+      # retries every 60s) — a human sees it out of hours.
+      #
+      # IMPORTANT — presence, not rate: production gunicorn workers each keep
+      # their own registry (no PROMETHEUS_MULTIPROC_DIR — backend#757), so a
+      # scrape reaches one worker. `increase(...) > 0` is sound (the incremented
+      # worker holds its non-zero value until it is eventually scraped), but
+      # exact rates and counts are NOT — do not rewrite these as rate or
+      # threshold alerts.
+      #
+      # Runbook: revel-backend docs/guides/observability.md (money-correctness),
+      # which documents these rules verbatim. Each increment is paired with a
+      # self-contained ERROR log line carrying the identifiers to recover the buyer.
+      # ========================================================================
+
+      # Stripe's session total disagreed with sum(Payment.amount)
+      - alert: StripeSessionTotalMismatch
+        expr: increase(revel_stripe_session_total_mismatch_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Stripe session total mismatch (call_site={{ $labels.call_site }})"
+          description: "Stripe's session total disagreed with sum(Payment.amount) at call_site={{ $labels.call_site }}. call_site=webhook means the buyer HAS been charged; call_site=preflight was caught before the session existed (nobody charged). Recover the buyer using the paired ERROR log line. Runbook: revel-backend docs/guides/observability.md (money-correctness)."
+
+      # A session that captured money was confirmed with no Payment rows to confirm it
+      - alert: StripeSessionPaidWithoutPayments
+        expr: increase(revel_stripe_session_paid_without_payments_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Stripe session paid without Payment records"
+          description: "A Stripe session that captured money was confirmed with no Payment rows — the buyer was charged and we have no record. Recover the buyer using the paired ERROR log line. Runbook: revel-backend docs/guides/observability.md (money-correctness)."
+
+      # ========================================================================
       # Business Logic Alerts
       # ========================================================================
 
