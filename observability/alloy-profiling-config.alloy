@@ -1,0 +1,48 @@
+// Grafana Alloy configuration for eBPF-based continuous profiling
+// This configuration enables Python profiling for Docker containers
+
+// Discover local Docker containers
+discovery.docker "local_containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+// Filter to only profile Python services (web, celery, beat)
+// Uses Docker Compose labels for compatibility with docker-rollout
+discovery.relabel "python_services" {
+  targets = discovery.docker.local_containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "(web|celery_default|beat)"
+    action        = "keep"
+  }
+}
+
+// eBPF profiling component
+pyroscope.ebpf "instance" {
+  forward_to = [pyroscope.write.endpoint.receiver]
+  targets    = discovery.relabel.python_services.output
+
+  // Language-specific profiling (Python enabled by default)
+  python_enabled = true
+
+  // Profiling configuration
+  collect_interval = "15s"  // How often to collect profiles
+  sample_rate      = 97     // Stack traces per second (prime number for better distribution)
+
+  // Demangle C++ symbols (useful for native extensions)
+  demangle = "simplified"
+}
+
+// Send profiles to Pyroscope server
+pyroscope.write "endpoint" {
+  endpoint {
+    url = "http://pyroscope:4040"
+  }
+
+  external_labels = {
+    "environment" = env("DEPLOYMENT_ENVIRONMENT"),
+    "service"     = "revel",
+    "instance"    = env("HOSTNAME"),
+  }
+}
