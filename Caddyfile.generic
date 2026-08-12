@@ -75,6 +75,13 @@
 			}
 		}
 		header Cache-Control "public, max-age=3600, stale-while-revalidate=86400"
+		# Embedding sites load these via <script src> — a cross-origin no-cors
+		# request, which is exactly what CORP polices. The site-wide
+		# `same-origin` above otherwise blocks the load outright
+		# (net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin — reproduced against
+		# prod). The in-handle override wins over the top-level header because
+		# it runs later in the middleware chain (verified against local Caddy).
+		header Cross-Origin-Resource-Policy "cross-origin"
 	}
 
 	# Static assets with long cache. `immutable` applies ONLY to the content-
