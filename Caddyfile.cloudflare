@@ -32,14 +32,6 @@
 	header Permissions-Policy "camera=(), microphone=(), usb=()"
 	header Cross-Origin-Opener-Policy "same-origin-allow-popups"
 
-	# Public brand assets (og-image, logos, icons) must be embeddable
-	# cross-origin: social-preview tools and og:image/og:logo consumers load
-	# them via <img> from their own origin, and CORP "same-origin" makes
-	# browsers block exactly that (issue #32). Everything else keeps the
-	# strict default above.
-	@shareable_asset path /og-*.png /logo* /favicon* /apple-touch-icon* /revel-email-logo*
-	header @shareable_asset Cross-Origin-Resource-Policy "cross-origin"
-
 	# --- Drop common vuln-scanner probes at the edge ---
 	# Bots hammer nonexistent PHP shells and exposed dotfiles (/.env, /.git/*).
 	# SvelteKit turned these into 404s logged as SSR errors, which tripped the
@@ -50,29 +42,55 @@
 		respond 404
 	}
 
-	# Optional: short cache for SSR HTML
-	@html {
-		path / /index.html
+	# SvelteKit deploy/runtime metadata must never be long-cached: version.json
+	# is how a stale tab detects a new deploy (kit.version.pollInterval on the
+	# frontend), and env.js carries the runtime PUBLIC_* env (frontend#396).
+	# Must precede @static, which would otherwise catch them via *.js — and
+	# DID, serving both with a year-long immutable cache.
+	@app_meta {
+		path /_app/version.json /_app/env.js
 	}
-	handle @html {
+	handle @app_meta {
 		reverse_proxy frontend:3000 {
 			transport http {
 				keepalive 90s
 				keepalive_idle_conns 32
 				max_conns_per_host 100
 			}
-			# Enable streaming for SSR responses (removed flush_interval -1)
-			# Real visitor IP for SvelteKit's getClientAddress() (adapter-node
-			# reads it via ADDRESS_HEADER=x-real-ip). SSR forwards it to the
-			# backend over the internal network — see backend#487.
-			header_up X-Real-IP {client_ip}
 		}
-		header Cache-Control "public, max-age=30, stale-while-revalidate=60"
+		header Cache-Control "no-cache"
 	}
 
-	# Static assets with long cache
+	# The embed loaders are versioned by NAME (embed-v1) and updated in place —
+	# the embed builder promises third-party sites the script "keeps working
+	# when we ship improvements", which the immutable cache they previously
+	# fell into (via *.js) broke.
+	@embed_loader {
+		path /embed-v1.js /embed-frame-v1.js
+	}
+	handle @embed_loader {
+		reverse_proxy frontend:3000 {
+			transport http {
+				keepalive 90s
+				keepalive_idle_conns 32
+				max_conns_per_host 100
+			}
+		}
+		header Cache-Control "public, max-age=3600, stale-while-revalidate=86400"
+		# Embedding sites load these via <script src> — a cross-origin no-cors
+		# request, which is exactly what CORP polices. The site-wide
+		# `same-origin` above otherwise blocks the load outright
+		# (net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin — reproduced against
+		# prod). The in-handle override wins over the top-level header because
+		# it runs later in the middleware chain (verified against local Caddy).
+		header Cross-Origin-Resource-Policy "cross-origin"
+	}
+
+	# Static assets with long cache. `immutable` applies ONLY to the content-
+	# hashed /_app/immutable/ tree — a broader /_app/* used to freeze
+	# version.json and env.js for a year (see @app_meta above).
 	@static {
-		path /_app/* /images/* /fonts/* *.js *.css *.woff2 *.png *.jpg *.jpeg *.svg *.ico
+		path /_app/immutable/* /images/* /fonts/* *.js *.css *.woff2 *.png *.jpg *.jpeg *.svg *.ico
 	}
 	handle @static {
 		reverse_proxy frontend:3000 {
@@ -84,11 +102,26 @@
 			# Static assets can be buffered (flush_interval -1 removed for consistency)
 		}
 		header Cache-Control "public, max-age=31536000, immutable"
+		# Public brand assets (og-image, logos, icons) must be embeddable
+		# cross-origin: social-preview tools and og:image/og:logo consumers
+		# load them via <img> from their own origin, and CORP "same-origin"
+		# blocks exactly that (issue #32). The override MUST live inside this
+		# handle: as a top-level matched `header` (how #33 shipped it) Caddy
+		# sorted it before the bare `same-origin`, which ran last and
+		# clobbered it — og images were being blocked again
+		# (net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin, reproduced against
+		# prod). In-handle ops run later in the chain and win, the same
+		# pattern as the embed loaders above.
+		@shareable_asset path /og-*.png /logo* /favicon* /apple-touch-icon* /revel-email-logo*
+		header @shareable_asset Cross-Origin-Resource-Policy "cross-origin"
 	}
 
-	# Public pages — cacheable, no user-specific data
+	# Public machine-readable files — cacheable, no user-specific data.
+	# /legal was dropped from this list: it is SSR HTML referencing content-
+	# hashed assets, so a cached copy spanning a deploy renders unstyled —
+	# the same failure mode the @html block used to inflict on `/`.
 	@public_pages {
-		path /legal /legal/* /robots.txt /sitemap.xml
+		path /robots.txt /sitemap.xml
 	}
 	handle @public_pages {
 		reverse_proxy frontend:3000 {
@@ -102,7 +135,8 @@
 		header Cache-Control "public, max-age=3600, stale-while-revalidate=300"
 	}
 
-	# Everything else (SSR pages, API calls, etc.)
+	# Everything else — SSR HTML, including `/` (the old @html block gave the
+	# landing page `public, max-age=30` + SWR, the same stale-document window).
 	handle {
 		reverse_proxy frontend:3000 {
 			transport http {
@@ -111,8 +145,18 @@
 				max_conns_per_host 100
 			}
 			# Enable streaming for all SSR responses (removed flush_interval -1)
+			# Real visitor IP for SvelteKit's getClientAddress() (adapter-node
+			# reads it via ADDRESS_HEADER=x-real-ip). SSR forwards it to the
+			# backend over the internal network — see backend#487.
 			header_up X-Real-IP {client_ip}
 		}
+		# Default only (`?` = set-if-absent): routes that opt into caching
+		# (feeds, sitemaps, oembed, /embed) keep their own header. Documents
+		# with NO Cache-Control get heuristic-cached by browsers — iOS Safari
+		# restores them across deploys, and the stale HTML then references
+		# hashed assets the new deploy no longer ships: an unstyled page until
+		# a manual reload. `no-cache` = store but always revalidate.
+		header ?Cache-Control "private, no-cache"
 	}
 }
 
