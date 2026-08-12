@@ -32,14 +32,6 @@
 	header Permissions-Policy "camera=(), microphone=(), usb=()"
 	header Cross-Origin-Opener-Policy "same-origin-allow-popups"
 
-	# Public brand assets (og-image, logos, icons) must be embeddable
-	# cross-origin: social-preview tools and og:image/og:logo consumers load
-	# them via <img> from their own origin, and CORP "same-origin" makes
-	# browsers block exactly that (issue #32). Everything else keeps the
-	# strict default above.
-	@shareable_asset path /og-*.png /logo* /favicon* /apple-touch-icon* /revel-email-logo*
-	header @shareable_asset Cross-Origin-Resource-Policy "cross-origin"
-
 	# --- Drop common vuln-scanner probes at the edge ---
 	# Bots hammer nonexistent PHP shells and exposed dotfiles (/.env, /.git/*).
 	# SvelteKit turned these into 404s logged as SSR errors, which tripped the
@@ -110,6 +102,18 @@
 			# Static assets can be buffered (flush_interval -1 removed for consistency)
 		}
 		header Cache-Control "public, max-age=31536000, immutable"
+		# Public brand assets (og-image, logos, icons) must be embeddable
+		# cross-origin: social-preview tools and og:image/og:logo consumers
+		# load them via <img> from their own origin, and CORP "same-origin"
+		# blocks exactly that (issue #32). The override MUST live inside this
+		# handle: as a top-level matched `header` (how #33 shipped it) Caddy
+		# sorted it before the bare `same-origin`, which ran last and
+		# clobbered it — og images were being blocked again
+		# (net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin, reproduced against
+		# prod). In-handle ops run later in the chain and win, the same
+		# pattern as the embed loaders above.
+		@shareable_asset path /og-*.png /logo* /favicon* /apple-touch-icon* /revel-email-logo*
+		header @shareable_asset Cross-Origin-Resource-Policy "cross-origin"
 	}
 
 	# Public machine-readable files — cacheable, no user-specific data.
