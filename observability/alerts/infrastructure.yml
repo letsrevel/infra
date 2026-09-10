@@ -139,6 +139,42 @@ groups:
           summary: "High number of Redis connections"
           description: "Redis has {{ $value }} connected clients."
 
+      # Redis Evicted Keys
+      #
+      # Redis runs with --maxmemory-policy volatile-lru, so only keys carrying a
+      # TTL are evictable. The Celery broker keys (celery, unacked,
+      # unacked_index, _kombu.binding.*) and the Telegram FSM keys have no TTL
+      # and are therefore never evicted — losing them would mean silently
+      # dropping accepted tasks (CELERY_TASK_ACKS_LATE=True). Any eviction at
+      # all means the cache working set has outgrown REDIS_MAXMEMORY; the next
+      # step past that is Redis refusing writes (see RedisRejectingWrites).
+      # No `for:` delay — evictions are a discrete event, not a level.
+      - alert: RedisKeysEvicted
+        expr: increase(redis_evicted_keys_total[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis is evicting keys"
+          description: "Redis evicted {{ $value }} keys in the last 10m — the cache working set exceeds REDIS_MAXMEMORY. Raise REDIS_MAXMEMORY (and the redis service memory limit) or shrink the cached working set."
+
+      # Redis Rejecting Writes (OOM)
+      #
+      # Under volatile-lru, once every TTL'd key is gone Redis answers writes
+      # with "OOM command not allowed when used memory > 'maxmemory'" instead of
+      # evicting the broker keys. That surfaces in INFO errorstats as
+      # errorstat_OOM, which redis_exporter exports as redis_errors_total{err="OOM"}.
+      # This is the loud failure the policy buys us: Celery publishes and cache
+      # writes fail visibly rather than tasks disappearing from the queue.
+      # No `for:` delay — an OOM error is a discrete one-occurrence incident, same
+      # pattern as RedisKeysEvicted and the Stripe money-correctness alerts.
+      - alert: RedisRejectingWrites
+        expr: increase(redis_errors_total{err="OOM"}[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis is rejecting writes (OOM)"
+          description: "Redis returned {{ $value }} OOM errors in the last 10m — it is at maxmemory with nothing left to evict. Celery task publishes and cache writes are failing. Raise REDIS_MAXMEMORY / the redis memory limit immediately."
+
       # ========================================================================
       # Observability Stack Alerts
       # ========================================================================

@@ -92,6 +92,8 @@ This reduces notification spam by bundling related alerts.
 - **ServiceDown** - Any monitored service is unreachable
 - **PostgresDown** - Database is down
 - **DiskSpaceCritical** - Less than 5% disk space remaining
+- **RedisKeysEvicted** - Redis evicted keys (working set exceeds maxmemory)
+- **RedisRejectingWrites** - Redis returning OOM errors; Celery publishes and cache writes failing
 
 #### Warning
 - **HighCPUUsage** - CPU above 90% for 5 minutes
