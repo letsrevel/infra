@@ -165,9 +165,10 @@ groups:
       # errorstat_OOM, which redis_exporter exports as redis_errors_total{err="OOM"}.
       # This is the loud failure the policy buys us: Celery publishes and cache
       # writes fail visibly rather than tasks disappearing from the queue.
+      # No `for:` delay — an OOM error is a discrete one-occurrence incident, same
+      # pattern as RedisKeysEvicted and the Stripe money-correctness alerts.
       - alert: RedisRejectingWrites
         expr: increase(redis_errors_total{err="OOM"}[10m]) > 0
-        for: 5m
         labels:
           severity: critical
         annotations:
