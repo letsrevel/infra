@@ -196,13 +196,11 @@ fi
 
 feature_stripe="no"
 stripe_secret=""
-stripe_publishable=""
 stripe_account=""
 default_currency="eur"
 if yesno "Enable Stripe payments? (online ticket sales — advanced)" n; then
 	feature_stripe="yes"
 	stripe_secret="$(ask_secret "Stripe secret key (sk_...)")"
-	stripe_publishable="$(ask "Stripe publishable key (pk_...)")"
 	stripe_account="$(ask "Platform Stripe account id (acct_...)")"
 	default_currency="$(ask "Default currency" eur)"
 	if ! command -v jq >/dev/null 2>&1; then
@@ -427,7 +425,6 @@ say "Writing $ENV_FILE"
 	echo "LLM_API_KEY=${llm_api_key}"
 	echo ""
 	echo "STRIPE_SECRET_KEY=${stripe_secret}"
-	echo "STRIPE_PUBLISHABLE_KEY=${stripe_publishable}"
 	echo "STRIPE_ACCOUNT=${stripe_account}"
 	echo "DEFAULT_CURRENCY=${default_currency}"
 	echo ""
