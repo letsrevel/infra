@@ -373,6 +373,9 @@ say "Writing $ENV_FILE"
 	echo ""
 	echo "REDIS_HOST=redis"
 	echo "REDIS_PORT=6379"
+	# CACHE_REDIS_DB / CELERY_REDIS_DB / AIOGRAM_REDIS_DB are deliberately omitted:
+	# the backend's defaults (2 / 0 / 1) are already disjoint. If you ever pin one
+	# here, pin all three — two consumers on one index share a FLUSHDB blast radius.
 	echo ""
 	# `web` is required: the frontend's SSR calls hit the API over the internal
 	# network as http://web:8000, so Django sees Host: web. localhost/127.0.0.1
