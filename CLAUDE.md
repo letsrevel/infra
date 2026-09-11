@@ -59,6 +59,12 @@ The `.env` file controls all configuration. Critical variables:
 - `DB_HOST=pgbouncer` and `DB_PORT=6432` when using PgBouncer
 - `DB_CONN_MAX_AGE=0` when using PgBouncer (connection pooling conflicts)
 
+**Redis (one instance, partitioned by logical DB index):**
+- `CACHE_REDIS_DB=2` (Django cache), `CELERY_REDIS_DB=0` (broker), `AIOGRAM_REDIS_DB=1` (Telegram FSM)
+- **Keep all three disjoint.** The index is a namespace, not an isolation boundary — `maxmemory-policy volatile-lru` evicts any TTL'd key on the index, and a `FLUSHDB` (what Django's `cache.clear()` compiles to) wipes every consumer sharing it
+- Repointing `CACHE_REDIS_DB` is safe — the next deploy starts on a cold cache. Repointing `CELERY_REDIS_DB` strands queued tasks; repointing `AIOGRAM_REDIS_DB` drops in-flight bot conversations
+- `redis-cli INFO keyspace` shows which indices are actually populated
+
 **Observability:**
 - `ENABLE_OBSERVABILITY=True` - Must be enabled for tracing
 - `TRACING_SAMPLE_RATE=0.1` - 10% sampling to reduce overhead
