@@ -21,7 +21,7 @@ query_range:
     cache:
       embedded_cache:
         enabled: true
-        max_size_mb: 512
+        max_size_mb: 64
 
 schema_config:
   configs:

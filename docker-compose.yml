@@ -400,8 +400,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1g
-          cpus: '2.0'
+          memory: ${LOKI_MEM_LIMIT:-1g}
+          cpus: ${LOKI_CPU_LIMIT:-2.0}
 
   tempo:
     image: grafana/tempo:2.5.0
@@ -432,8 +432,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512m
-          cpus: '2.0'
+          memory: ${TEMPO_MEM_LIMIT:-512m}
+          cpus: ${TEMPO_CPU_LIMIT:-2.0}
 
   prometheus:
     image: prom/prometheus:v2.53.0
@@ -451,6 +451,7 @@ services:
       - '--storage.tsdb.retention.time=7d'
       - '--storage.tsdb.retention.size=10GB'
       - '--web.enable-lifecycle'
+      - '--web.enable-remote-write-receiver'
     volumes:
       - ./observability/prometheus-config.yml:/etc/prometheus/prometheus.yml
       - ./observability/alerts:/etc/prometheus/alerts
@@ -470,8 +471,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2g
-          cpus: '1.0'
+          memory: ${PROMETHEUS_MEM_LIMIT:-2g}
+          cpus: ${PROMETHEUS_CPU_LIMIT:-1.0}
 
   alertmanager:
     image: prom/alertmanager:v0.27.0
@@ -623,7 +624,7 @@ services:
 
   pyroscope:
     image: grafana/pyroscope:1.9.0
-    profiles: ["observability"]
+    profiles: ["profiling"]
     container_name: revel_pyroscope
     restart: always
     logging:
@@ -642,23 +643,21 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512m
-          cpus: '2.0'
+          memory: ${PYROSCOPE_MEM_LIMIT:-512m}
+          cpus: ${PYROSCOPE_CPU_LIMIT:-2.0}
 
   alloy:
-    image: grafana/alloy:latest
+    image: grafana/alloy:v1.2.0
     profiles: ["observability"]
     container_name: revel_alloy
     restart: always
-    privileged: true
-    pid: host
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
     volumes:
-      - ./observability/alloy-config.alloy:/etc/alloy/config.alloy:ro
+      - ./observability/alloy-logs-config.alloy:/etc/alloy/config.alloy:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - alloy_data:/var/lib/alloy
     environment:
@@ -673,11 +672,6 @@ services:
       - "12345"
     networks:
       - revel_network
-    depends_on:
-      pyroscope:
-        condition: service_started
-      loki:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:12345/ready"]
       interval: 10s
@@ -686,8 +680,56 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512m
-          cpus: '1.0'
+          memory: ${ALLOY_MEM_LIMIT:-512m}
+          cpus: ${ALLOY_CPU_LIMIT:-1.0}
+
+  alloy-profiling:
+    image: grafana/alloy:v1.2.0
+    profiles: ["profiling"]
+    container_name: revel_alloy_profiling
+    restart: always
+    cap_add:
+      - BPF
+      - PERFMON
+      - SYS_PTRACE
+      - SYS_RESOURCE
+      - DAC_READ_SEARCH
+      - CHECKPOINT_RESTORE
+      - SYSLOG
+      - SYS_ADMIN
+    pid: host
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - ./observability/alloy-profiling-config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys/kernel/tracing:/sys/kernel/tracing:ro
+      - alloy_profiling_data:/var/lib/alloy
+    environment:
+      - DEPLOYMENT_ENVIRONMENT=${DEPLOYMENT_ENVIRONMENT:-production}
+      - HOSTNAME=${HOSTNAME:-revel-production}
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/var/lib/alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+    expose:
+      - "12345"
+    networks:
+      - revel_network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:12345/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: ${ALLOY_PROFILING_MEM_LIMIT:-512m}
+          cpus: ${ALLOY_PROFILING_CPU_LIMIT:-1.0}
 
   grafana:
     image: grafana/grafana:11.1.0
@@ -724,8 +766,6 @@ services:
         condition: service_healthy
       prometheus:
         condition: service_healthy
-      pyroscope:
-        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health"]
       interval: 10s
@@ -734,8 +774,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2g
-          cpus: '1.0'
+          memory: ${GRAFANA_MEM_LIMIT:-2g}
+          cpus: ${GRAFANA_CPU_LIMIT:-1.0}
 
   # ============================================================================
   # Security
@@ -784,6 +824,7 @@ volumes:
   alertmanager_data:
   pyroscope_data:
   alloy_data:
+  alloy_profiling_data:
   grafana_data:
 
 networks:
