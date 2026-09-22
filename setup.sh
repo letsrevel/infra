@@ -101,7 +101,8 @@ if [ -n "$HOST_CPUS" ] && [ -n "$HOST_MEM_MB" ]; then
 	echo "Detected host: ${HOST_CPUS} vCPU, ${HOST_MEM_MB} MB RAM."
 fi
 echo "  slim = core only (~2 vCPU / 4 GB)."
-echo "  full = everything incl. observability + antivirus (8 vCPU / 32 GB)."
+echo "  full = observability + antivirus on by default; Telegram and the login canary"
+echo "         stay opt-in (8 vCPU / 32 GB)."
 # Recommend a tier from the detected hardware (full only when the box is clearly big).
 recommended_tier="slim"
 if [ -n "$HOST_CPUS" ] && [ -n "$HOST_MEM_MB" ] && [ "$HOST_CPUS" -ge 8 ] && [ "$HOST_MEM_MB" -ge 24000 ]; then
@@ -129,10 +130,8 @@ if [ "$tier" = "full" ]; then profile_default="y"; else profile_default="n"; fi
 say "Domains"
 frontend_domain="$(ask "Frontend domain" "example.com")"
 api_domain="$(ask "API domain" "api.${frontend_domain}")"
-grafana_domain=""
-if [ "$tier" = "full" ]; then
-	grafana_domain="$(ask "Grafana domain" "grafana.${frontend_domain}")"
-fi
+# The Grafana domain is asked right after the observability question (section 5):
+# it depends on that answer, not on the tier.
 
 # ---------------------------------------------------------------------------
 # 4. Email
@@ -163,9 +162,11 @@ say "Optional services (the tier preset just sets the defaults — toggle freely
 # backend repeatedly fails to export OTLP to localhost:4318 (#19).
 enable_observability="no"
 feature_observability="False"
+grafana_domain=""
 if yesno "Enable the observability stack (Grafana/Prometheus/Loki/Tempo)?" "$profile_default"; then
 	enable_observability="yes"
 	feature_observability="True"
+	grafana_domain="$(ask "Grafana domain" "grafana.${frontend_domain}")"
 fi
 
 # ClamAV malware scanning. One decision drives both the antivirus profile and
@@ -393,7 +394,7 @@ say "Writing $ENV_FILE"
 	# GRAFANA_DOMAIN only when observability runs; otherwise the Caddyfile's
 	# {$GRAFANA_DOMAIN:grafana.localhost} default keeps the block inert (no ACME).
 	if [ "$enable_observability" = "yes" ]; then
-		echo "GRAFANA_DOMAIN=${grafana_domain:-grafana.${frontend_domain}}"
+		echo "GRAFANA_DOMAIN=${grafana_domain}"
 	fi
 	echo ""
 	echo "FEATURE_MALWARE_SCAN=${feature_malware}"
@@ -570,8 +571,8 @@ echo "  - API:                   https://${api_domain}"
 if [ "$user_google_login" = "yes" ]; then
 	echo "  - Google OAuth client:   add the redirect URI https://${api_domain}/api/auth/oidc/google/callback"
 fi
-if [ "$tier" = "full" ]; then
-	echo "  - Grafana:               https://${grafana_domain:-grafana.${frontend_domain}} (admin / see ${ENV_FILE})"
+if [ "$enable_observability" = "yes" ]; then
+	echo "  - Grafana:               https://${grafana_domain} (admin / see ${ENV_FILE})"
 fi
 if [ "$behind_cloudflare" = "yes" ]; then
 	echo "  - Re-enable the Cloudflare proxy (ORANGE cloud) now that certs are issued."

@@ -27,7 +27,7 @@ The wizard is interactive and has no unattended mode. It:
 
 1. Offers to install Docker (via `get.docker.com`) if it is missing, and checks that ports 80 and 443 are free.
 2. Suggests a tier from the detected CPU and RAM.
-3. Asks for the frontend and API domains (and a Grafana domain on the full tier), SMTP (or dry-run email) and which optional services to enable: observability, ClamAV, the Telegram bot, LLM questionnaire evaluation, Stripe, Google login and the login canary. It also asks whether you are behind Cloudflare.
+3. Asks for the frontend and API domains, SMTP (or dry-run email) and which optional services to enable: observability (plus its Grafana domain), ClamAV, the Telegram bot, LLM questionnaire evaluation, Stripe, Google login and the login canary. It also asks whether you are behind Cloudflare.
 4. Asks whether this is a single-organization instance (the default), which turns off public organization creation.
 5. Backs up any existing `.env`, writes a new one with generated secrets and picks the matching Caddyfile.
 6. Downloads the city list (and, optionally, the 182 MB IP2Location LITE database), pulls the images from `ghcr.io/letsrevel` and runs `docker compose up -d`.
@@ -42,7 +42,7 @@ A tier is a preset of defaults for the questions above and for resource limits. 
 | Tier | Hardware | Runs |
 |---|---|---|
 | Slim | 2 vCPU, 4 GB RAM | Web app, API, Celery worker and beat, PostgreSQL/PostGIS, PgBouncer, Redis, Caddy |
-| Full | 8 vCPU, 32 GB RAM | Slim plus any of: Grafana/Loki/Tempo/Prometheus observability, ClamAV, the Telegram bot, a login canary |
+| Full | 8 vCPU, 32 GB RAM | Slim plus any of: Grafana/Loki/Tempo/Prometheus observability, ClamAV, the Telegram bot, a login canary. The wizard defaults observability and ClamAV to on; Telegram and the canary stay opt-in |
 
 The slim tier costs about €20/month (Hetzner CPX22, September 2026). letsrevel.io runs the full tier on a Hetzner CCX33 (8 dedicated vCPU, 32 GB RAM, 240 GB disk). The wizard suggests full only on hosts with at least 8 vCPU and 24 GB RAM, and warns below 2 vCPU and 3.5 GB.
 
