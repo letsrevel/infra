@@ -34,6 +34,10 @@ yesno() {
 	[ "$answer" = "y" ] || [ "$answer" = "Y" ]
 }
 gen() { openssl rand -hex 32; }
+# Exact health status: grepping `docker compose ps` for "healthy" also matches "unhealthy".
+web_healthy() {
+	[ "$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose ps -q web 2>/dev/null)" 2>/dev/null)" = "healthy" ]
+}
 
 # Host resource detection (Linux). Empty if unavailable (e.g. non-Linux dev box),
 # in which case the wizard silently skips the fit checks.
@@ -213,7 +217,7 @@ fi
 # 5b. Google SSO (optional) — admin login and user login are SEPARATE toggles
 # ---------------------------------------------------------------------------
 say "Google SSO (optional)"
-feature_google_sso="False"
+user_google_login="no"
 google_client_id=""
 google_client_secret=""
 admin_sso="no"
@@ -223,7 +227,7 @@ if yesno "Configure Google SSO? (one Google OAuth app, used for admin and/or use
 	google_client_id="$(ask "Google OAuth client ID")"
 	google_client_secret="$(ask_secret "Google OAuth client secret")"
 	if yesno "Enable Google SSO for USER-facing login?" y; then
-		feature_google_sso="True"
+		user_google_login="yes"
 	fi
 	if yesno "Enable Google SSO for the Django ADMIN login?" n; then
 		admin_sso="yes"
@@ -397,7 +401,6 @@ say "Writing $ENV_FILE"
 	echo "FEATURE_TELEGRAM=${feature_telegram}"
 	echo "FEATURE_LLM_EVALUATION=${feature_llm}"
 	echo "FEATURE_ORGANIZATION_CREATION=${feature_org_creation}"
-	echo "FEATURE_GOOGLE_SSO=${feature_google_sso}"
 	if [ "$enable_observability" = "yes" ]; then
 		# The backend defaults OTLP to localhost:4318; point it at the tempo container.
 		echo "OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4318"
@@ -405,6 +408,13 @@ say "Writing $ENV_FILE"
 	if [ -n "$google_client_id" ]; then
 		echo "GOOGLE_SSO_CLIENT_ID=${google_client_id}"
 		echo "GOOGLE_SSO_CLIENT_SECRET=${google_client_secret}"
+	fi
+	if [ "$user_google_login" = "yes" ]; then
+		# User login goes through the generic OpenID Connect flow, reusing the same Google client.
+		echo "OIDC_PROVIDERS=google"
+		echo "OIDC_GOOGLE_ISSUER=https://accounts.google.com"
+		echo "OIDC_GOOGLE_CLIENT_ID=${google_client_id}"
+		echo "OIDC_GOOGLE_CLIENT_SECRET=${google_client_secret}"
 	fi
 	if [ "$admin_sso" = "yes" ]; then
 		echo "GOOGLE_SSO_SUPERUSER_LIST=${google_superuser_list}"
@@ -463,7 +473,16 @@ mkdir -p geo-data
 geo_base_url="$(ask "Geo-data base URL" "$GEO_BASE_URL_DEFAULT")"
 echo "Downloading worldcities.csv (full city list)..."
 if ! curl -fsSL "${geo_base_url}/worldcities.csv" -o geo-data/worldcities.csv; then
-	warn "Full city list unavailable; the app falls back to the bundled 50-city mini list."
+	rm -f geo-data/worldcities.csv   # never leave a partial download for the migration to load
+	# The ./geo-data bind mount hides the image's bundled mini list, so copy it out of the image.
+	revel_image="$(docker compose config --images web 2>/dev/null | grep -m1 '/revel:' || true)"
+	if [ -n "$revel_image" ] && docker run --rm --entrypoint cat "$revel_image" \
+		/app/src/geo/data/worldcities.mini.csv >geo-data/worldcities.mini.csv; then
+		warn "Full city list unavailable; using the bundled 50-city mini list."
+	else
+		rm -f geo-data/worldcities.mini.csv
+		warn "No city list available: the first migration will fail until geo-data/worldcities.csv exists."
+	fi
 fi
 if yesno "Download the IP2Location LITE GeoIP database?" n; then
 	if ! curl -fsSL "${geo_base_url}/IP2LOCATION-LITE-DB5.BIN" -o geo-data/IP2LOCATION-LITE-DB5.BIN; then
@@ -493,7 +512,7 @@ docker compose up -d
 
 say "Waiting for the web service to become healthy..."
 for _ in $(seq 1 30); do
-	if docker compose ps web 2>/dev/null | grep -q "healthy"; then
+	if web_healthy; then
 		break
 	fi
 	sleep 5
@@ -526,7 +545,7 @@ fi
 # bootstrap_admin prompts for the admin email/password and first org, pins the
 # username to the email (matching public-API accounts), and prints the URLs.
 admin_created="no"
-if docker compose ps web 2>/dev/null | grep -q "healthy"; then
+if web_healthy; then
 	if yesno "Create the admin user and first organization now?" y; then
 		if docker compose exec web python manage.py bootstrap_admin; then
 			admin_created="yes"
@@ -548,6 +567,9 @@ if [ "$admin_created" != "yes" ]; then
 fi
 echo "  - Frontend:              https://${frontend_domain}"
 echo "  - API:                   https://${api_domain}"
+if [ "$user_google_login" = "yes" ]; then
+	echo "  - Google OAuth client:   add the redirect URI https://${api_domain}/api/auth/oidc/google/callback"
+fi
 if [ "$tier" = "full" ]; then
 	echo "  - Grafana:               https://${grafana_domain:-grafana.${frontend_domain}} (admin / see ${ENV_FILE})"
 fi
