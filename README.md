@@ -1,384 +1,120 @@
-# Revel Infrastructure
+# Revel infrastructure
 
+**Revel is an open-source event management, ticketing and membership platform for communities, clubs, independent venues and independent artists.**
+
+[![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](./LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/Rnwbzuvxvn)
 
-This repository contains the complete infrastructure configuration for the Revel project, including all services, observability stack, and reverse proxy setup.
+This repository is the Docker Compose deployment for Revel: the stack, three Caddyfile variants, the `setup.sh` wizard for self-hosters and the scripts we use to run [letsrevel.io](https://letsrevel.io). For what Revel does and who it is for, read the [main README](https://github.com/letsrevel/revel-backend#readme). The full self-hosting guide is at [docs.letsrevel.io/self-hosting](https://docs.letsrevel.io/self-hosting/).
 
-> **Self-hosting Revel?** Clone this repo and run **`./setup.sh`** — an interactive
-> wizard that takes a fresh VPS to a running instance (slim ~2 vCPU/4 GB, or the full
-> stack). Full walkthrough: **https://docs.letsrevel.io/self-hosting**.
-> The sections below document our own production deployment and the repo mechanics.
+## Install
 
----
+You need:
 
-## 🔗 Related Repositories
+- A Linux x86-64 server (the images are built for `linux/amd64` only).
+- A root shell, or a user in the `docker` group.
+- `git`, `openssl` and `curl`.
+- DNS A records for two hostnames: one for the web app and one for the API, which defaults to `api.<your domain>`. Add a third for Grafana if you enable observability.
+- Ports 80 and 443 open.
 
-This repository contains the **infrastructure and deployment configurations** for Revel. The complete platform consists of:
-
-- **[revel-backend](https://github.com/letsrevel/revel-backend)** - Django REST API, business logic, database models
-- **[revel-frontend](https://github.com/letsrevel/revel-frontend)** - SvelteKit web application, user interface
-- **[infra](https://github.com/letsrevel/infra)** (this repository) - Docker Compose setup, reverse proxy, observability stack, deployment configurations
-
----
-
-## Overview
-
-This is a consolidated Docker Compose setup that includes:
-
-### Application Services
-- **Web** - Django application (Gunicorn + Uvicorn workers)
-- **Frontend** - Next.js/SvelteKit frontend application
-- **Celery Workers** - Background task processing (default queue)
-- **Beat** - Celery scheduler for periodic tasks
-- **Telegram Bot** - Telegram bot service
-
-### Infrastructure Services
-- **Caddy** - Reverse proxy with automatic HTTPS
-- **PostgreSQL** (PostGIS) - Primary database
-- **PgBouncer** - Connection pooler for PostgreSQL
-- **Redis** - Cache and message broker
-
-### Observability Stack
-- **Grafana** - Metrics and logs visualization
-- **Prometheus** - Metrics collection
-- **Loki** - Log aggregation
-- **Tempo** - Distributed tracing
-- **Pyroscope** - Continuous profiling
-- **Alloy** - eBPF-based profiling collector
-- **postgres-exporter** - PostgreSQL metrics exporter
-
-### Security
-- **ClamAV** - Antivirus scanning for uploaded files
-
-## Quick Start
-
-1. **Clone the repository**
-   ```bash
-   cd /path/to/revel/infra
-   ```
-
-2. **Create environment file**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your actual configuration
-   ```
-
-3. **Start all services**
-   ```bash
-   docker compose up -d
-   ```
-
-4. **Check service status**
-   ```bash
-   docker compose ps
-   ```
-
-5. **View logs**
-   ```bash
-   docker compose logs -f [service_name]
-   ```
-
-## Configuration
-
-### Environment Variables
-
-All configuration is done through the `.env` file. See `.env.example` for all available options.
-
-Key variables to configure:
-- Database credentials (`DB_*`)
-- Django secret key (`SECRET_KEY`)
-- Google SSO for the Django admin login (`GOOGLE_SSO_*`)
-- Grafana admin credentials (`GRAFANA_ADMIN_*`)
-- Pushover notifications (`PUSHOVER_USER_KEY`, `PUSHOVER_APP_TOKEN`)
-
-### Domain Configuration
-
-Domains are parameterized via `.env` (`FRONTEND_DOMAIN`, `API_DOMAIN`, `DOCS_DOMAIN`,
-`GRAFANA_DOMAIN`) and consumed by the Caddyfile. Three Caddyfile variants ship:
-
-- `Caddyfile` — Cloudflare-aware + legacy redirects (**production default**)
-- `Caddyfile.cloudflare` — self-host behind Cloudflare's proxy
-- `Caddyfile.generic` — self-host with Caddy as the edge (no Cloudflare)
-
-Select a variant with `CADDYFILE_PATH` in `.env` (the wizard sets it). The defaults in
-`Caddyfile` resolve to the production domains, so production needs no `.env` change.
-DNS setup and the Cloudflare orange-cloud caveat are documented at
-https://docs.letsrevel.io/self-hosting.
-
-### Optional services (Compose profiles)
-
-The core (web, frontend, celery, beat, postgres, pgbouncer, redis) always runs.
-Observability, antivirus (ClamAV), and the Telegram bot are gated behind Compose
-profiles via `COMPOSE_PROFILES` in `.env` (e.g. `observability,antivirus,telegram`).
-An empty value runs the slim core only.
-
-## Directory Structure
-
-```
-.
-├── docker-compose.yml          # Main compose file
-├── Caddyfile                   # Reverse proxy configuration
-├── .env                        # Environment variables (create from .env.example)
-├── .env.example                # Environment variables template
-├── observability/              # Observability stack configurations
-│   ├── alloy-config.alloy
-│   ├── grafana-datasources.yaml
-│   ├── loki-config.yaml
-│   ├── prometheus-config.yml
-│   └── tempo-config.yaml
-├── media/                      # User-uploaded media files
-├── geo-data/                   # Geographic data files
-├── sentinel/                   # LLM sentinel data
-└── certs/                      # Apple Wallet certificates (optional)
-```
-
-## Apple Wallet Pass Certificates
-
-The application supports generating Apple Wallet passes for event tickets. This requires Apple Developer certificates to be placed in the `certs/` directory.
-
-### Required Files
+Then:
 
 ```bash
-certs/
-├── pass_certificate.pem  # Apple Pass Type ID certificate
-├── pass_key.pem          # Private key for the certificate
-└── wwdr.pem              # Apple Worldwide Developer Relations certificate
+git clone https://github.com/letsrevel/infra && cd infra && ./setup.sh
 ```
 
-### Setting File Permissions
+The wizard is interactive and has no unattended mode. It:
 
-**IMPORTANT:** All certificate files must be readable by the Docker container (which runs as non-root user `appuser`):
+1. Offers to install Docker (via `get.docker.com`) if it is missing, and checks that ports 80 and 443 are free.
+2. Suggests a tier from the detected CPU and RAM.
+3. Asks for the frontend and API domains (and a Grafana domain on the full tier), SMTP (or dry-run email) and which optional services to enable: observability, ClamAV, the Telegram bot, LLM questionnaire evaluation, Stripe, Google login and the login canary. It also asks whether you are behind Cloudflare.
+4. Asks whether this is a single-organization instance (the default), which turns off public organization creation.
+5. Backs up any existing `.env`, writes a new one with generated secrets and picks the matching Caddyfile.
+6. Downloads the city list (and, optionally, the 182 MB IP2Location LITE database), pulls the images from `ghcr.io/letsrevel` and runs `docker compose up -d`.
+7. Once the API is healthy, registers Stripe webhooks (if Stripe is enabled and `jq` is installed) and creates the admin user and first organization.
+
+Caddy obtains Let's Encrypt certificates on first start. Behind Cloudflare, keep the DNS records DNS-only (gray cloud) until the certificates are issued; the wizard pauses for this.
+
+## Tiers
+
+A tier is a preset of defaults for the questions above and for resource limits. Every optional service can still be switched on or off on its own.
+
+| Tier | Hardware | Runs |
+|---|---|---|
+| Slim | 2 vCPU, 4 GB RAM | Web app, API, Celery worker and beat, PostgreSQL/PostGIS, PgBouncer, Redis, Caddy |
+| Full | 8 vCPU, 32 GB RAM | Slim plus any of: Grafana/Loki/Tempo/Prometheus observability, ClamAV, the Telegram bot, a login canary |
+
+The slim tier costs about €20/month (Hetzner CPX22, September 2026). letsrevel.io runs the full tier on a Hetzner CCX33 (8 dedicated vCPU, 32 GB RAM, 240 GB disk). The wizard suggests full only on hosts with at least 8 vCPU and 24 GB RAM, and warns below 2 vCPU and 3.5 GB.
+
+| | Slim | Full |
+|---|---|---|
+| Gunicorn workers x threads | 2 x 2 | 6 x 4 |
+| Celery concurrency | 2 | 4 |
+| Postgres `shared_buffers` / `max_connections` | 256MB / 50 | 4GB / 100 |
+| Web memory limit | 1500m | 12g |
+
+## Services, profiles and feature flags
+
+Always running: `caddy`, `web` (Gunicorn, gthread workers), `celery_default`, `beat`, `frontend`, `revel_postgres` (PostGIS 17), `pgbouncer` and `redis`.
+
+Optional services are Compose profiles, listed in `COMPOSE_PROFILES` in `.env`. Most profiles have a matching feature flag that the backend reads, and the wizard sets both together. `GET /api/version` reports some of the flags (organization creation, Telegram, LLM evaluation) so the web app can hide features that are off.
+
+| Profile | Services | Flag |
+|---|---|---|
+| `observability` | grafana, prometheus, alertmanager, loki, tempo, pyroscope, alloy, postgres-exporter, redis-exporter, node_exporter, blackbox-exporter | `FEATURE_OBSERVABILITY` |
+| `antivirus` | clamav | `FEATURE_MALWARE_SCAN` |
+| `telegram` | telegram | `FEATURE_TELEGRAM` |
+| `canary` | canary (synthetic login check) | none |
+
+Flags with no service behind them: `FEATURE_LLM_EVALUATION` (with `LLM_*`), `FEATURE_ORGANIZATION_CREATION` (off for single-organization instances), Stripe keys, `OIDC_PROVIDERS` for user login through Google or any OpenID Connect provider, `GOOGLE_SSO_*` for the Django admin login, `APPLE_WALLET_*`, `GOOGLE_WALLET_*` and `INTEGRATIONS_EVENTBRITE_*`. All are optional. SMTP is optional too, but without it nobody receives verification or ticket emails. See [`.env.example`](.env.example) for every variable; its values document our own production deployment.
+
+The wizard's "Google SSO for user-facing login" answer writes `FEATURE_GOOGLE_SSO`, which the backend no longer reads. For user login through Google, set `OIDC_PROVIDERS=google` and the `OIDC_GOOGLE_*` variables instead ([tiers and configuration](https://docs.letsrevel.io/self-hosting/tiers/)).
+
+### Caddyfiles
+
+Domains come from `.env` (`FRONTEND_DOMAIN`, `API_DOMAIN` and `GRAFANA_DOMAIN`, plus `DOCS_DOMAIN` in the production `Caddyfile` only). Pick a variant with `CADDYFILE_PATH`; the wizard sets it.
+
+- `Caddyfile`: Cloudflare-aware plus legacy redirects. The production default; its fallbacks resolve to the letsrevel.io domains.
+- `Caddyfile.cloudflare`: self-hosting behind Cloudflare's proxy.
+- `Caddyfile.generic`: self-hosting with Caddy as the edge.
+
+**Never buffer frontend responses.** The frontend uses SvelteKit streaming SSR. A `flush_interval -1` on the frontend `reverse_proxy` makes Caddy hold the whole response, and pages hang on a loading state until SSR finishes. None of the shipped Caddyfiles set it. To check a deployment, compare time to first byte with total time; they should differ:
 
 ```bash
-chmod 644 /path/to/revel/infra/certs/pass_certificate.pem
-chmod 644 /path/to/revel/infra/certs/pass_key.pem
-chmod 644 /path/to/revel/infra/certs/wwdr.pem
+curl -w "\nTTFB: %{time_starttransfer}s\nTotal: %{time_total}s\n" -o /dev/null "https://<your-frontend-domain>/events"
 ```
 
-**Why `644` for all files (including the private key)?**
-- `644` (rw-r--r--): Owner can read/write, others can read
-- The Docker container runs as `appuser` (non-root), which needs read access to mounted files
-- While `600` would be ideal for private keys in traditional setups, Docker volume mounts require readable permissions when the container user differs from the host file owner
-- The files are only accessible within the server's filesystem (not exposed externally)
+### Apple Wallet certificates
 
-If you see errors like `PermissionError: [Errno 13] Permission denied: '/app/certs/pass_certificate.pem'`, verify the file permissions are set correctly.
+Apple Wallet passes need a Pass Type ID certificate, its private key and Apple's WWDR certificate. Put them in `certs/`, which is mounted into the containers at `/app/certs`, and point `APPLE_WALLET_CERT_PATH`, `APPLE_WALLET_KEY_PATH` and `APPLE_WALLET_WWDR_CERT_PATH` at them (for example `/app/certs/pass-certificate.pem`). Also set `APPLE_WALLET_PASS_TYPE_ID`, `APPLE_WALLET_TEAM_ID` and, if the key has one, `APPLE_WALLET_KEY_PASSWORD`.
 
-## Volumes
-
-The following Docker volumes are created for persistent data:
-- `caddy_data` - Caddy data (SSL certificates)
-- `caddy_config` - Caddy configuration cache
-- `revel_postgres_data` - PostgreSQL database
-- `redis_data` - Redis persistence
-- `loki_data` - Log storage
-- `tempo_data` - Trace storage
-- `prometheus_data` - Metrics storage
-- `pyroscope_data` - Profiling data
-- `alloy_data` - Alloy configuration
-- `grafana_data` - Grafana dashboards and settings
-
-## Networking
-
-All services run on a dedicated bridge network called `revel_network`.
-
-## Deployment
-
-### Server Specifications
-
-Revel is deployed on a **Hetzner CCX33** instance:
-- **CPU**: 8 vCPU
-- **RAM**: 32 GB
-- **Disk**: 240 GB
-
-### Initial Deployment
-
-1. Set up your server with Docker and Docker Compose
-2. Clone this repository
-3. Configure your `.env` file
-4. Ensure DNS records point to your server:
-   - beta.letsrevel.io
-   - beta-api.letsrevel.io
-   - grafana.letsrevel.io
-5. Start services: `docker compose up -d`
-6. Caddy will automatically provision SSL certificates
-
-### Updates
-
-To update a service to the latest image:
-```bash
-docker compose pull [service_name]
-docker compose up -d [service_name]
-```
-
-To update all services:
-```bash
-./deploy.sh update
-```
-
-## 🚨 Critical: SvelteKit Streaming SSR
-
-**IMPORTANT:** The Revel frontend uses SvelteKit with **streaming Server-Side Rendering (SSR)**. Improper Caddy configuration will cause pages to hang indefinitely with "eternal loading" states.
-
-### ⚠️ Reverse Proxy Configuration
-
-**The Caddyfile MUST NOT buffer responses.** Buffering breaks SvelteKit's streaming SSR.
-
-**❌ WRONG - DO NOT USE:**
-
-```caddy
-beta.letsrevel.io {
-    reverse_proxy revel_frontend:3000 {
-        flush_interval -1  # ❌ Buffers entire response - BREAKS SVELTEKIT!
-    }
-}
-```
-
-**✅ CORRECT - Streaming enabled:**
-
-```caddy
-beta.letsrevel.io {
-    encode zstd gzip
-
-    reverse_proxy revel_frontend:3000 {
-        # No flush_interval = streaming enabled by default ✅
-        transport http {
-            keepalive 90s
-            keepalive_idle_conns 32
-            max_conns_per_host 100
-        }
-    }
-}
-```
-
-### Why This Matters
-
-**With `flush_interval -1` (buffering enabled):**
-- ❌ Caddy holds the ENTIRE HTML response in memory
-- ❌ Browser receives nothing until SSR fully completes
-- ❌ Pages appear to "hang" or show eternal loading spinner
-- ❌ Poor user experience, especially on slow connections
-- ❌ Potential timeout issues on large pages
-
-**Without buffering (default):**
-- ✅ Caddy streams HTML as SvelteKit generates it
-- ✅ Browser receives and renders content progressively
-- ✅ Faster perceived load times (better TTFB)
-- ✅ Better user experience
-- ✅ Support for large pages without timeouts
-
-### Symptoms of Misconfiguration
-
-If you experience these issues, check the Caddyfile for response buffering:
-- Pages show eternal loading spinner
-- Network tab shows request pending for many seconds
-- HTML arrives all at once after a long delay
-- Time-to-first-byte (TTFB) equals total response time
-
-### Testing Your Configuration
+The containers run as a non-root user whose UID differs from the host's, so every file, including the key, must be mode `644`. With `600`, pass generation fails with `PermissionError: [Errno 13] Permission denied: '/app/certs/pass-certificate.pem'`.
 
 ```bash
-# Test response timing - should see progressive delivery
-curl -w "\nTTFB: %{time_starttransfer}s\nTotal: %{time_total}s\n" \
-  -o /dev/null \
-  "https://beta.letsrevel.io/events"
-
-# Good: TTFB and Total are close (streaming)
-# Bad: TTFB ≈ Total time (buffering!)
+chmod 644 certs/*.pem
 ```
 
-### Verified Working Configuration
+Google Wallet setup is in the [self-hosting docs](https://docs.letsrevel.io/self-hosting/#google-wallet-setup-one-time).
 
-See the `Caddyfile` in this repository for the correct production configuration. All `reverse_proxy` blocks for the frontend **must not** include `flush_interval -1`.
-
----
-
-## Monitoring
-
-Access monitoring tools:
-- Grafana: https://grafana.letsrevel.io
-- Prometheus (metrics): Available internally at `revel_prometheus:9090`
-
-## Maintenance
-
-### Database Backups
+## Operations
 
 ```bash
-docker compose exec revel_postgres pg_dump -U $DB_USER $DB_NAME > backup.sql
-```
-
-### Logs
-
-View logs for a specific service:
-```bash
-docker compose logs -f [service_name]
-```
-
-View all logs:
-```bash
-docker compose logs -f
-```
-
-### Scaling Celery Workers
-
-To scale up celery workers:
-```bash
+./deploy.sh update      # pull the latest images and redeploy
+./deploy.sh backup      # pg_dump to backup_<timestamp>.sql
+./deploy.sh logs web    # also: up, down, restart, ps, pull
 docker compose up -d --scale celery_default=4
 ```
 
-## Troubleshooting
+`deploy-rollout.sh` replaces containers with `docker-rollout` instead of stopping them first, `safe-reboot.sh` drains Celery tasks before rebooting the host and `ALERTING_SETUP.md` covers Pushover alerts and Grafana dashboards. Persistent data lives in named volumes (`revel_postgres_data`, `redis_data`, `caddy_data`, `caddy_config` and `clamav_data`, plus one per observability service). `docker compose down -v` deletes all of it.
 
-### Certificate Permission Errors
-
-If you see errors like:
-```
-PermissionError: [Errno 13] Permission denied: '/app/certs/pass_certificate.pem'
-```
-
-Fix the certificate file permissions:
-```bash
-chmod 644 /path/to/revel/infra/certs/*.pem
-```
-
-Verify permissions are correct:
-```bash
-ls -la /path/to/revel/infra/certs/
-```
-
-All files should show `-rw-r--r--` (644 permissions).
-
-### Check service health
-```bash
-docker compose ps
-```
-
-### Restart a service
-```bash
-docker compose restart [service_name]
-```
-
-### Reset everything (CAUTION: destroys data)
-```bash
-docker compose down -v
-```
-
-## Security Notes
-
-- Change all default passwords in `.env`
-- Never commit `.env` to version control
-- Regularly update Docker images
-- Monitor Grafana for security alerts
-- Review Pushover alert notifications
-
-## Differences from Old Setup
-
-This consolidated setup differs from the previous multi-repo setup:
-- All services are in a single `docker-compose.yml`
-- Uses a dedicated `revel_network` instead of an external `shared` network
-- Includes Redis directly (was previously in shared services)
-- Simplified volume management
-- All observability services are included
-- Comprehensive alerting via Prometheus and Pushover
+Before exposing an instance: change every default password in `.env`, keep `.env` out of version control and keep the images updated.
 
 ## License
 
-See LICENSE file in the repository root.
+MIT. See [LICENSE](LICENSE).
+
+## Related repositories
+
+- [revel-backend](https://github.com/letsrevel/revel-backend): the Django API and the main project page
+- [revel-frontend](https://github.com/letsrevel/revel-frontend): the SvelteKit web app
+- [.github](https://github.com/letsrevel/.github): the organization profile
