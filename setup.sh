@@ -471,26 +471,68 @@ say "Writing $ENV_FILE"
 # ---------------------------------------------------------------------------
 say "Geo data"
 mkdir -p geo-data
+# The backend image that web/celery/beat/telegram run (used below for the bundled
+# city list and to read the container user's uid/gid).
+revel_image="$(docker compose config --images web 2>/dev/null | grep -m1 '/revel:' || true)"
+# After a first run geo-data/ belongs to the container user (section 9b), so a
+# re-run as a non-root user needs sudo to write into it.
+geo_write() { if [ -w geo-data ]; then cat >"$1"; else sudo tee "$1" >/dev/null; fi; }
+geo_rm() { if [ -w geo-data ]; then rm -f "$@"; else sudo rm -f "$@" || true; fi; }
 geo_base_url="$(ask "Geo-data base URL" "$GEO_BASE_URL_DEFAULT")"
 echo "Downloading worldcities.csv (full city list)..."
-if ! curl -fsSL "${geo_base_url}/worldcities.csv" -o geo-data/worldcities.csv; then
-	rm -f geo-data/worldcities.csv   # never leave a partial download for the migration to load
+if ! curl -fsSL "${geo_base_url}/worldcities.csv" | geo_write geo-data/worldcities.csv; then
+	geo_rm geo-data/worldcities.csv   # never leave a partial download for the migration to load
 	# The ./geo-data bind mount hides the image's bundled mini list, so copy it out of the image.
-	revel_image="$(docker compose config --images web 2>/dev/null | grep -m1 '/revel:' || true)"
 	if [ -n "$revel_image" ] && docker run --rm --entrypoint cat "$revel_image" \
-		/app/src/geo/data/worldcities.mini.csv >geo-data/worldcities.mini.csv; then
+		/app/src/geo/data/worldcities.mini.csv | geo_write geo-data/worldcities.mini.csv; then
 		warn "Full city list unavailable; using the bundled 50-city mini list."
 	else
-		rm -f geo-data/worldcities.mini.csv
+		geo_rm geo-data/worldcities.mini.csv
 		warn "No city list available: the first migration will fail until geo-data/worldcities.csv exists."
 	fi
 fi
 if yesno "Download the IP2Location LITE GeoIP database?" n; then
-	if ! curl -fsSL "${geo_base_url}/IP2LOCATION-LITE-DB5.BIN" -o geo-data/IP2LOCATION-LITE-DB5.BIN; then
+	if ! curl -fsSL "${geo_base_url}/IP2LOCATION-LITE-DB5.BIN" | geo_write geo-data/IP2LOCATION-LITE-DB5.BIN; then
+		geo_rm geo-data/IP2LOCATION-LITE-DB5.BIN
 		warn "GeoIP database unavailable; IP geolocation lookups return null."
 	fi
 fi
 echo "Geo datasets are CC-BY / CC-BY-SA — keep geo-data/NOTICE if you redistribute them."
+
+# ---------------------------------------------------------------------------
+# 9b. Bind-mount ownership (after the geo download, so those files are included)
+# ---------------------------------------------------------------------------
+# The backend containers run as a non-root system user (appuser, uid/gid 997), but
+# ./media, ./geo-data and ./sentinel come from the git checkout and belong to whoever
+# cloned it. Unless they're handed to the container user, uploads, generated
+# PDFs/wallet passes, the periodic IP2Location refresh and the sentinel model
+# download fail with PermissionError [Errno 13] (#47). Read the uid/gid from the
+# image so this survives a future change there; fall back to 997.
+say "Data directory ownership"
+mkdir -p media sentinel
+app_uid=""
+app_gid=""
+if [ -n "$revel_image" ]; then
+	app_uid="$(docker run --rm --entrypoint id "$revel_image" -u 2>/dev/null || true)"
+	app_gid="$(docker run --rm --entrypoint id "$revel_image" -g 2>/dev/null || true)"
+fi
+case "$app_uid" in '' | *[!0-9]*) app_uid="997" ;; esac
+case "$app_gid" in '' | *[!0-9]*) app_gid="997" ;; esac
+data_dirs=(media geo-data sentinel)
+if [ -z "$(find "${data_dirs[@]}" \( ! -user "$app_uid" -o ! -group "$app_gid" \) -print -quit 2>/dev/null)" ]; then
+	echo "${data_dirs[*]} already owned by ${app_uid}:${app_gid}."
+elif [ "$(id -u)" -eq 0 ]; then
+	chown -R "${app_uid}:${app_gid}" "${data_dirs[@]}"
+	echo "Chowned ${data_dirs[*]} to ${app_uid}:${app_gid} (the containers' appuser)."
+elif command -v sudo >/dev/null 2>&1 && {
+	echo "Chowning ${data_dirs[*]} to ${app_uid}:${app_gid} (the containers' appuser) needs sudo."
+	sudo chown -R "${app_uid}:${app_gid}" "${data_dirs[@]}"
+}; then
+	echo "Chowned ${data_dirs[*]} to ${app_uid}:${app_gid}."
+else
+	warn "Could not chown ${data_dirs[*]} — uploads will fail with Errno 13 until you run:"
+	warn "  sudo chown -R ${app_uid}:${app_gid} ${data_dirs[*]}"
+fi
 
 # ---------------------------------------------------------------------------
 # 10. Cloudflare caveat
