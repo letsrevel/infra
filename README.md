@@ -68,7 +68,7 @@ Optional services are Compose profiles, listed in `COMPOSE_PROFILES` in `.env`. 
 
 Flags with no service behind them: `FEATURE_LLM_EVALUATION` (with `LLM_*`), `FEATURE_ORGANIZATION_CREATION` (off for single-organization instances), Stripe keys, `OIDC_PROVIDERS` for user login through Google or any OpenID Connect provider, `GOOGLE_SSO_*` for the Django admin login, `APPLE_WALLET_*`, `GOOGLE_WALLET_*` and `INTEGRATIONS_EVENTBRITE_*`. All are optional. SMTP is optional too, but without it nobody receives verification or ticket emails. See [`.env.example`](.env.example) for every variable; its values document our own production deployment.
 
-The wizard's "Google SSO for user-facing login" answer writes `FEATURE_GOOGLE_SSO`, which the backend no longer reads. For user login through Google, set `OIDC_PROVIDERS=google` and the `OIDC_GOOGLE_*` variables instead ([tiers and configuration](https://docs.letsrevel.io/self-hosting/tiers/)).
+The wizard asks for one Google OAuth client and uses it for two separate toggles. User-facing login writes `OIDC_PROVIDERS=google` with `OIDC_GOOGLE_ISSUER`, `OIDC_GOOGLE_CLIENT_ID` and `OIDC_GOOGLE_CLIENT_SECRET`; add `https://<API_DOMAIN>/api/auth/oidc/google/callback` as a redirect URI on that client. Admin login writes `GOOGLE_SSO_*`. To add another OpenID Connect provider, see [tiers and configuration](https://docs.letsrevel.io/self-hosting/tiers/).
 
 ### Caddyfiles
 
