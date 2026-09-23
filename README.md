@@ -86,7 +86,7 @@ curl -w "\nTTFB: %{time_starttransfer}s\nTotal: %{time_total}s\n" -o /dev/null "
 
 ### Data directory ownership
 
-The backend containers (`web`, `celery_default`, `beat`, `telegram`) run as a non-root user, `appuser` (uid/gid 997). They write to three bind-mounted directories from the checkout: `media/` (uploads, logos, generated PDFs and wallet passes), `geo-data/` (the periodic IP2Location refresh) and `sentinel/` (the LLM sentinel model). A fresh clone belongs to whoever cloned it, so without a chown those writes fail with `PermissionError: [Errno 13]`. `setup.sh` reads the uid/gid from the image and runs the chown for you (with `sudo` when not root). On an install that did not go through the wizard:
+The backend containers (`web`, `celery_default`, `beat`, `telegram`) run as a non-root user, `appuser` (uid/gid 997). They write to bind-mounted directories from the checkout: `media/` (uploads, logos, generated PDFs and wallet passes; all four), plus `geo-data/` (the periodic IP2Location refresh) and `sentinel/` (the LLM sentinel model) for `web` and `celery_default` only. A fresh clone belongs to whoever cloned it, so without a chown those writes fail with `PermissionError: [Errno 13]`. `setup.sh` reads the uid/gid from the image and runs the chown for you (with `sudo` when not root). On an install that did not go through the wizard:
 
 ```bash
 docker compose run --rm --no-deps --entrypoint id web     # expect uid=997(appuser) gid=997(appuser)
