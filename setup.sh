@@ -490,8 +490,13 @@ geo_base_url="$(ask "Geo-data base URL" "$GEO_BASE_URL_DEFAULT")"
 echo "Downloading worldcities.csv (full city list)..."
 if ! curl -fsSL "${geo_base_url}/worldcities.csv" | geo_write geo-data/worldcities.csv; then
 	geo_rm geo-data/worldcities.csv   # never leave a partial download for the migration to load
-	# The ./geo-data bind mount hides the image's bundled mini list, so copy it out of the image.
-	if [ -n "$revel_image" ] && docker run --rm --entrypoint cat "$revel_image" \
+	# Newer images (revel-backend#1002) keep the bundled mini list in geo/fixtures/,
+	# outside the ./geo-data bind mount, and the migration falls back to it on its own.
+	# Older images keep it in geo/data/, which the bind mount hides, so copy it out.
+	if [ -n "$revel_image" ] && docker run --rm --entrypoint test "$revel_image" \
+		-f /app/src/geo/fixtures/worldcities.mini.csv; then
+		warn "Full city list unavailable; the migration will use the image's bundled 50-city mini list."
+	elif [ -n "$revel_image" ] && docker run --rm --entrypoint cat "$revel_image" \
 		/app/src/geo/data/worldcities.mini.csv | geo_write geo-data/worldcities.mini.csv; then
 		warn "Full city list unavailable; using the bundled 50-city mini list."
 	else
