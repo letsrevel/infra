@@ -27,10 +27,10 @@ The wizard is interactive and has no unattended mode. It:
 
 1. Offers to install Docker (via `get.docker.com`) if it is missing, and checks that ports 80 and 443 are free.
 2. Suggests a tier from the detected CPU and RAM.
-3. Asks for the frontend and API domains (and a Grafana domain on the full tier), SMTP (or dry-run email) and which optional services to enable: observability, ClamAV, the Telegram bot, LLM questionnaire evaluation, Stripe, Google login and the login canary. It also asks whether you are behind Cloudflare.
+3. Asks for the frontend and API domains, SMTP (or dry-run email) and which optional services to enable: observability (plus its Grafana domain), ClamAV, the Telegram bot, LLM questionnaire evaluation, Stripe, Google login and the login canary. It also asks whether you are behind Cloudflare.
 4. Asks whether this is a single-organization instance (the default), which turns off public organization creation.
 5. Backs up any existing `.env`, writes a new one with generated secrets and picks the matching Caddyfile.
-6. Downloads the city list (and, optionally, the 182 MB IP2Location LITE database), pulls the images from `ghcr.io/letsrevel` and runs `docker compose up -d`.
+6. Downloads the city list (and, optionally, the 182 MB IP2Location LITE database), hands `media/`, `geo-data/` and `sentinel/` to the containers' user (see [Data directory ownership](#data-directory-ownership)), pulls the images from `ghcr.io/letsrevel` and runs `docker compose up -d`.
 7. Once the API is healthy, registers Stripe webhooks (if Stripe is enabled and `jq` is installed) and creates the admin user and first organization.
 
 Caddy obtains Let's Encrypt certificates on first start. Behind Cloudflare, keep the DNS records DNS-only (gray cloud) until the certificates are issued; the wizard pauses for this.
@@ -42,7 +42,7 @@ A tier is a preset of defaults for the questions above and for resource limits. 
 | Tier | Hardware | Runs |
 |---|---|---|
 | Slim | 2 vCPU, 4 GB RAM | Web app, API, Celery worker and beat, PostgreSQL/PostGIS, PgBouncer, Redis, Caddy |
-| Full | 8 vCPU, 32 GB RAM | Slim plus any of: Grafana/Loki/Tempo/Prometheus observability, ClamAV, the Telegram bot, a login canary |
+| Full | 8 vCPU, 32 GB RAM | Slim plus any of: Grafana/Loki/Tempo/Prometheus observability, ClamAV, the Telegram bot, a login canary. The wizard defaults observability and ClamAV to on; Telegram and the canary stay opt-in |
 
 The slim tier costs about €20/month (Hetzner CPX22, September 2026). letsrevel.io runs the full tier on a Hetzner CCX33 (8 dedicated vCPU, 32 GB RAM, 240 GB disk). The wizard suggests full only on hosts with at least 8 vCPU and 24 GB RAM, and warns below 2 vCPU and 3.5 GB.
 
@@ -82,6 +82,15 @@ Domains come from `.env` (`FRONTEND_DOMAIN`, `API_DOMAIN` and `GRAFANA_DOMAIN`, 
 
 ```bash
 curl -w "\nTTFB: %{time_starttransfer}s\nTotal: %{time_total}s\n" -o /dev/null "https://<your-frontend-domain>/events"
+```
+
+### Data directory ownership
+
+The backend containers (`web`, `celery_default`, `beat`, `telegram`) run as a non-root user, `appuser` (uid/gid 997). They write to bind-mounted directories from the checkout: `media/` (uploads, logos, generated PDFs and wallet passes; all four), plus `geo-data/` (the periodic IP2Location refresh) and `sentinel/` (the LLM sentinel model) for `web` and `celery_default` only. A fresh clone belongs to whoever cloned it, so without a chown those writes fail with `PermissionError: [Errno 13]`. `setup.sh` reads the uid/gid from the image and runs the chown for you (with `sudo` when not root). On an install that did not go through the wizard:
+
+```bash
+docker compose run --rm --no-deps --entrypoint id web     # expect uid=997(appuser) gid=997(appuser)
+sudo chown -R 997:997 media geo-data sentinel
 ```
 
 ### Apple Wallet certificates

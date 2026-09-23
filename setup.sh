@@ -87,6 +87,14 @@ for port in 80 443; do
 	fi
 done
 
+# A previous run hands geo-data/ to the container user (section 9b), so a non-root
+# re-run needs sudo to refresh the downloads. Fail now, before .env is touched.
+if [ -d geo-data ] && [ ! -w geo-data ] && ! command -v sudo >/dev/null 2>&1; then
+	echo "geo-data/ is not writable by $(id -un) and sudo is not available."
+	echo "Re-run ./setup.sh as root. Aborting."
+	exit 1
+fi
+
 if [ -f "$ENV_FILE" ]; then
 	backup="${ENV_FILE}.bak.$(date +%Y%m%d_%H%M%S)"
 	cp "$ENV_FILE" "$backup"
@@ -101,7 +109,8 @@ if [ -n "$HOST_CPUS" ] && [ -n "$HOST_MEM_MB" ]; then
 	echo "Detected host: ${HOST_CPUS} vCPU, ${HOST_MEM_MB} MB RAM."
 fi
 echo "  slim = core only (~2 vCPU / 4 GB)."
-echo "  full = everything incl. observability + antivirus (8 vCPU / 32 GB)."
+echo "  full = observability + antivirus on by default; Telegram and the login canary"
+echo "         stay opt-in (8 vCPU / 32 GB)."
 # Recommend a tier from the detected hardware (full only when the box is clearly big).
 recommended_tier="slim"
 if [ -n "$HOST_CPUS" ] && [ -n "$HOST_MEM_MB" ] && [ "$HOST_CPUS" -ge 8 ] && [ "$HOST_MEM_MB" -ge 24000 ]; then
@@ -129,10 +138,8 @@ if [ "$tier" = "full" ]; then profile_default="y"; else profile_default="n"; fi
 say "Domains"
 frontend_domain="$(ask "Frontend domain" "example.com")"
 api_domain="$(ask "API domain" "api.${frontend_domain}")"
-grafana_domain=""
-if [ "$tier" = "full" ]; then
-	grafana_domain="$(ask "Grafana domain" "grafana.${frontend_domain}")"
-fi
+# The Grafana domain is asked right after the observability question (section 5):
+# it depends on that answer, not on the tier.
 
 # ---------------------------------------------------------------------------
 # 4. Email
@@ -163,9 +170,11 @@ say "Optional services (the tier preset just sets the defaults — toggle freely
 # backend repeatedly fails to export OTLP to localhost:4318 (#19).
 enable_observability="no"
 feature_observability="False"
+grafana_domain=""
 if yesno "Enable the observability stack (Grafana/Prometheus/Loki/Tempo)?" "$profile_default"; then
 	enable_observability="yes"
 	feature_observability="True"
+	grafana_domain="$(ask "Grafana domain" "grafana.${frontend_domain}")"
 fi
 
 # ClamAV malware scanning. One decision drives both the antivirus profile and
@@ -393,7 +402,7 @@ say "Writing $ENV_FILE"
 	# GRAFANA_DOMAIN only when observability runs; otherwise the Caddyfile's
 	# {$GRAFANA_DOMAIN:grafana.localhost} default keeps the block inert (no ACME).
 	if [ "$enable_observability" = "yes" ]; then
-		echo "GRAFANA_DOMAIN=${grafana_domain:-grafana.${frontend_domain}}"
+		echo "GRAFANA_DOMAIN=${grafana_domain}"
 	fi
 	echo ""
 	echo "FEATURE_MALWARE_SCAN=${feature_malware}"
@@ -470,26 +479,73 @@ say "Writing $ENV_FILE"
 # ---------------------------------------------------------------------------
 say "Geo data"
 mkdir -p geo-data
+# The backend image that web/celery/beat/telegram run (used below for the bundled
+# city list and to read the container user's uid/gid).
+revel_image="$(docker compose config --images web 2>/dev/null | grep -m1 '/revel:' || true)"
+# After a first run geo-data/ belongs to the container user (section 9b), so a
+# re-run as a non-root user needs sudo to write into it (checked in preflight).
+geo_write() { if [ -w geo-data ]; then cat >"$1"; else sudo tee "$1" >/dev/null; fi; }
+geo_rm() { if [ -w geo-data ]; then rm -f "$@"; else sudo rm -f "$@"; fi; }
 geo_base_url="$(ask "Geo-data base URL" "$GEO_BASE_URL_DEFAULT")"
 echo "Downloading worldcities.csv (full city list)..."
-if ! curl -fsSL "${geo_base_url}/worldcities.csv" -o geo-data/worldcities.csv; then
-	rm -f geo-data/worldcities.csv   # never leave a partial download for the migration to load
-	# The ./geo-data bind mount hides the image's bundled mini list, so copy it out of the image.
-	revel_image="$(docker compose config --images web 2>/dev/null | grep -m1 '/revel:' || true)"
-	if [ -n "$revel_image" ] && docker run --rm --entrypoint cat "$revel_image" \
-		/app/src/geo/data/worldcities.mini.csv >geo-data/worldcities.mini.csv; then
+if ! curl -fsSL "${geo_base_url}/worldcities.csv" | geo_write geo-data/worldcities.csv; then
+	geo_rm geo-data/worldcities.csv   # never leave a partial download for the migration to load
+	# Newer images (revel-backend#1002) keep the bundled mini list in geo/fixtures/,
+	# outside the ./geo-data bind mount, and the migration falls back to it on its own.
+	# Older images keep it in geo/data/, which the bind mount hides, so copy it out.
+	if [ -n "$revel_image" ] && docker run --rm --entrypoint test "$revel_image" \
+		-f /app/src/geo/fixtures/worldcities.mini.csv; then
+		warn "Full city list unavailable; the migration will use the image's bundled 50-city mini list."
+	elif [ -n "$revel_image" ] && docker run --rm --entrypoint cat "$revel_image" \
+		/app/src/geo/data/worldcities.mini.csv | geo_write geo-data/worldcities.mini.csv; then
 		warn "Full city list unavailable; using the bundled 50-city mini list."
 	else
-		rm -f geo-data/worldcities.mini.csv
+		geo_rm geo-data/worldcities.mini.csv
 		warn "No city list available: the first migration will fail until geo-data/worldcities.csv exists."
 	fi
 fi
 if yesno "Download the IP2Location LITE GeoIP database?" n; then
-	if ! curl -fsSL "${geo_base_url}/IP2LOCATION-LITE-DB5.BIN" -o geo-data/IP2LOCATION-LITE-DB5.BIN; then
+	if ! curl -fsSL "${geo_base_url}/IP2LOCATION-LITE-DB5.BIN" | geo_write geo-data/IP2LOCATION-LITE-DB5.BIN; then
+		geo_rm geo-data/IP2LOCATION-LITE-DB5.BIN
 		warn "GeoIP database unavailable; IP geolocation lookups return null."
 	fi
 fi
 echo "Geo datasets are CC-BY / CC-BY-SA — keep geo-data/NOTICE if you redistribute them."
+
+# ---------------------------------------------------------------------------
+# 9b. Bind-mount ownership (after the geo download, so those files are included)
+# ---------------------------------------------------------------------------
+# The backend containers run as a non-root system user (appuser, uid/gid 997), but
+# ./media, ./geo-data and ./sentinel come from the git checkout and belong to whoever
+# cloned it. Unless they're handed to the container user, uploads, generated
+# PDFs/wallet passes, the periodic IP2Location refresh and the sentinel model
+# download fail with PermissionError [Errno 13] (#47). Read the uid/gid from the
+# image so this survives a future change there; fall back to 997.
+say "Data directory ownership"
+mkdir -p media sentinel
+app_uid=""
+app_gid=""
+if [ -n "$revel_image" ]; then
+	app_uid="$(docker run --rm --entrypoint id "$revel_image" -u 2>/dev/null || true)"
+	app_gid="$(docker run --rm --entrypoint id "$revel_image" -g 2>/dev/null || true)"
+fi
+case "$app_uid" in '' | *[!0-9]*) app_uid="997" ;; esac
+case "$app_gid" in '' | *[!0-9]*) app_gid="997" ;; esac
+data_dirs=(media geo-data sentinel)
+if [ -z "$(find "${data_dirs[@]}" \( ! -user "$app_uid" -o ! -group "$app_gid" \) -print -quit 2>/dev/null)" ]; then
+	echo "${data_dirs[*]} already owned by ${app_uid}:${app_gid}."
+elif [ "$(id -u)" -eq 0 ]; then
+	chown -R "${app_uid}:${app_gid}" "${data_dirs[@]}"
+	echo "Chowned ${data_dirs[*]} to ${app_uid}:${app_gid} (the containers' appuser)."
+elif command -v sudo >/dev/null 2>&1 && {
+	echo "Chowning ${data_dirs[*]} to ${app_uid}:${app_gid} (the containers' appuser) needs sudo."
+	sudo chown -R "${app_uid}:${app_gid}" "${data_dirs[@]}"
+}; then
+	echo "Chowned ${data_dirs[*]} to ${app_uid}:${app_gid}."
+else
+	warn "Could not chown ${data_dirs[*]} — uploads will fail with Errno 13 until you run:"
+	warn "  sudo chown -R ${app_uid}:${app_gid} ${data_dirs[*]}"
+fi
 
 # ---------------------------------------------------------------------------
 # 10. Cloudflare caveat
@@ -570,8 +626,8 @@ echo "  - API:                   https://${api_domain}"
 if [ "$user_google_login" = "yes" ]; then
 	echo "  - Google OAuth client:   add the redirect URI https://${api_domain}/api/auth/oidc/google/callback"
 fi
-if [ "$tier" = "full" ]; then
-	echo "  - Grafana:               https://${grafana_domain:-grafana.${frontend_domain}} (admin / see ${ENV_FILE})"
+if [ "$enable_observability" = "yes" ]; then
+	echo "  - Grafana:               https://${grafana_domain} (admin / see ${ENV_FILE})"
 fi
 if [ "$behind_cloudflare" = "yes" ]; then
 	echo "  - Re-enable the Cloudflare proxy (ORANGE cloud) now that certs are issued."
