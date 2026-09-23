@@ -87,6 +87,14 @@ for port in 80 443; do
 	fi
 done
 
+# A previous run hands geo-data/ to the container user (section 9b), so a non-root
+# re-run needs sudo to refresh the downloads. Fail now, before .env is touched.
+if [ -d geo-data ] && [ ! -w geo-data ] && ! command -v sudo >/dev/null 2>&1; then
+	echo "geo-data/ is not writable by $(id -un) and sudo is not available."
+	echo "Re-run ./setup.sh as root. Aborting."
+	exit 1
+fi
+
 if [ -f "$ENV_FILE" ]; then
 	backup="${ENV_FILE}.bak.$(date +%Y%m%d_%H%M%S)"
 	cp "$ENV_FILE" "$backup"
@@ -475,9 +483,9 @@ mkdir -p geo-data
 # city list and to read the container user's uid/gid).
 revel_image="$(docker compose config --images web 2>/dev/null | grep -m1 '/revel:' || true)"
 # After a first run geo-data/ belongs to the container user (section 9b), so a
-# re-run as a non-root user needs sudo to write into it.
+# re-run as a non-root user needs sudo to write into it (checked in preflight).
 geo_write() { if [ -w geo-data ]; then cat >"$1"; else sudo tee "$1" >/dev/null; fi; }
-geo_rm() { if [ -w geo-data ]; then rm -f "$@"; else sudo rm -f "$@" || true; fi; }
+geo_rm() { if [ -w geo-data ]; then rm -f "$@"; else sudo rm -f "$@"; fi; }
 geo_base_url="$(ask "Geo-data base URL" "$GEO_BASE_URL_DEFAULT")"
 echo "Downloading worldcities.csv (full city list)..."
 if ! curl -fsSL "${geo_base_url}/worldcities.csv" | geo_write geo-data/worldcities.csv; then
