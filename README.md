@@ -27,7 +27,7 @@ The wizard is interactive and has no unattended mode. It:
 
 1. Offers to install Docker (via `get.docker.com`) if it is missing, and checks that ports 80 and 443 are free.
 2. Suggests a tier from the detected CPU and RAM.
-3. Asks for the frontend and API domains, SMTP (or dry-run email) and which optional services to enable: observability (plus its Grafana domain), ClamAV, the Telegram bot, LLM questionnaire evaluation, Stripe, Google login, the login canary and the OAuth / OpenID Connect provider. It also asks whether you are behind Cloudflare.
+3. Asks for the frontend and API domains, SMTP (or dry-run email; with real SMTP it also offers an optional dedicated sending domain for organization mail and an optional bounce-webhook secret, both left out of `.env` when blank and kept on a re-run) and which optional services to enable: observability (plus its Grafana domain), ClamAV, the Telegram bot, LLM questionnaire evaluation, Stripe, Google login, the login canary and the OAuth / OpenID Connect provider. It also asks whether you are behind Cloudflare.
 4. Asks whether this is a single-organization instance (the default), which turns off public organization creation.
 5. Backs up any existing `.env`, writes a new one with generated secrets (plus, if the OAuth provider is on, a signing key in `certs/oidc.pem` that is created once and never replaced) and picks the matching Caddyfile.
 6. Downloads the city list (and, optionally, the 182 MB IP2Location LITE database), hands `media/`, `geo-data/` and `sentinel/` to the containers' user (see [Data directory ownership](#data-directory-ownership)), pulls the images from `ghcr.io/letsrevel` and runs `docker compose up -d`.
@@ -69,6 +69,13 @@ Optional services are Compose profiles, listed in `COMPOSE_PROFILES` in `.env`. 
 Flags with no service behind them: `FEATURE_LLM_EVALUATION` (with `LLM_*`), `FEATURE_ORGANIZATION_CREATION` (off for single-organization instances), Stripe keys, `OIDC_PROVIDERS` for user login through Google or any OpenID Connect provider, `GOOGLE_SSO_*` for the Django admin login, `APPLE_WALLET_*`, `GOOGLE_WALLET_*`, `INTEGRATIONS_EVENTBRITE_*` and `OIDC_SIGNING_KEY_PATH` with `OAUTH_ISSUER` for the OAuth provider. All are optional. SMTP is optional too, but without it nobody receives verification or ticket emails. See [`.env.example`](.env.example) for every variable; its values document our own production deployment.
 
 The wizard asks for one Google OAuth client and uses it for two separate toggles. User-facing login writes `OIDC_PROVIDERS=google` with `OIDC_GOOGLE_ISSUER`, `OIDC_GOOGLE_CLIENT_ID` and `OIDC_GOOGLE_CLIENT_SECRET`; add `https://<API_DOMAIN>/api/auth/oidc/google/callback` as a redirect URI on that client. Admin login writes `GOOGLE_SSO_*`. To add another OpenID Connect provider, see [tiers and configuration](https://docs.letsrevel.io/self-hosting/tiers/).
+
+### Email
+
+Any SMTP provider works; letsrevel.io uses the Brevo SMTP relay (`smtp-relay.brevo.com`, port 587, TLS). Two optional variables sit next to the SMTP settings:
+
+- `ORG_EMAIL_DOMAIN`: a dedicated sending domain (for example `mail.<your domain>`) for mail that organizations send to people: announcements, invitations, event updates and reminders. This keeps its reputation apart from account mail such as verification, password reset and tickets. Unset, that mail uses the domain of `DEFAULT_FROM_EMAIL`. Authenticate the domain (DKIM and DMARC) at your SMTP provider before you set it. It needs no MX record, but do not publish a null MX: RFC 7505 says a null-MX domain should not be used as a From domain.
+- `EMAIL_WEBHOOK_SECRET`: turns on the bounce and complaint webhook at `POST https://<API_DOMAIN>/api/email-events/brevo`. The endpoint accepts `Authorization: Bearer <secret>` or basic auth with the secret as password, so in Brevo's webhook settings you can use `https://revel:<secret>@<API_DOMAIN>/api/email-events/brevo`. Unset, the endpoint returns 404.
 
 ### Caddyfiles
 

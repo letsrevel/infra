@@ -34,6 +34,12 @@ yesno() {
 	[ "$answer" = "y" ] || [ "$answer" = "Y" ]
 }
 gen() { openssl rand -hex 32; }
+# Current value of VAR in the existing .env (empty if unset or no .env yet), so a
+# re-run can offer it as the default. Last assignment wins; surrounding quotes stripped.
+env_value() {
+	[ -f "$ENV_FILE" ] || return 0
+	sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1 | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
+}
 # OAuth / OIDC provider signing key (ADR-0008: the provider is on iff this key is
 # readable AND OAUTH_ISSUER is set). Created once and NEVER regenerated: a new key
 # invalidates every ID token already issued. The containers run as uid 997, so the
@@ -182,6 +188,8 @@ email_host=""
 email_port="587"
 email_user=""
 email_password=""
+org_email_domain=""
+email_webhook_secret=""
 default_from="Revel <noreply@${frontend_domain}>"
 if yesno "Configure real SMTP now? (no = console/dry-run for testing)" n; then
 	email_dry_run="False"
@@ -190,6 +198,23 @@ if yesno "Configure real SMTP now? (no = console/dry-run for testing)" n; then
 	email_user="$(ask "SMTP username")"
 	email_password="$(ask_secret "SMTP password")"
 	default_from="$(ask "From address" "Revel <noreply@${frontend_domain}>")"
+
+	# Optional extras; blank leaves the variable out of .env. A re-run offers the
+	# values from the existing .env, so pressing Enter keeps them ('none' clears).
+	echo "Organization mail (announcements, invitations, event updates) can go out from"
+	echo "a dedicated domain, e.g. mail.${frontend_domain}. Blank = the From address's domain."
+	org_email_domain="$(ask "Dedicated sending domain for organization mail (optional)" "$(env_value ORG_EMAIL_DOMAIN)")"
+	[ "$org_email_domain" = "none" ] && org_email_domain=""
+	if [ -n "$org_email_domain" ]; then
+		echo "Authenticate ${org_email_domain} (DKIM + DMARC) at your SMTP provider before"
+		echo "sending from it. It needs no MX record (and must not have a null MX)."
+	fi
+	existing_webhook_secret="$(env_value EMAIL_WEBHOOK_SECRET)"
+	webhook_prompt="Email-provider webhook secret for bounces/complaints (optional, blank = off)"
+	[ -n "$existing_webhook_secret" ] && webhook_prompt="Email-provider webhook secret for bounces/complaints (blank = keep current, 'none' = off)"
+	email_webhook_secret="$(ask_secret "$webhook_prompt")"
+	[ -z "$email_webhook_secret" ] && email_webhook_secret="$existing_webhook_secret"
+	[ "$email_webhook_secret" = "none" ] && email_webhook_secret=""
 fi
 
 # ---------------------------------------------------------------------------
@@ -494,6 +519,14 @@ say "Writing $ENV_FILE"
 	echo "EMAIL_HOST_PASSWORD=${email_password}"
 	echo "EMAIL_USE_TLS=True"
 	echo "DEFAULT_FROM_EMAIL=\"${default_from}\""
+	if [ -n "$org_email_domain" ]; then
+		# Dedicated sending domain for org-pushed mail; unset = domain of DEFAULT_FROM_EMAIL.
+		echo "ORG_EMAIL_DOMAIN=${org_email_domain}"
+	fi
+	if [ -n "$email_webhook_secret" ]; then
+		# Bounce/complaint webhook: POST https://${api_domain}/api/email-events/brevo
+		echo "EMAIL_WEBHOOK_SECRET=${email_webhook_secret}"
+	fi
 	echo ""
 	echo "TELEGRAM_BOT_TOKEN=${telegram_token}"
 	echo "LLM_DEFAULT_MODEL=${llm_model}"
@@ -689,6 +722,10 @@ if [ "$enable_oauth_provider" = "yes" ]; then
 	echo "  - OAuth provider:        https://${api_domain}/.well-known/openid-configuration"
 	echo "  - BACK UP ${OIDC_KEY_FILE} separately: it is not in the database backups, and"
 	echo "    losing it invalidates every ID token already issued."
+fi
+if [ -n "$email_webhook_secret" ]; then
+	echo "  - Bounce webhook:        https://revel:<EMAIL_WEBHOOK_SECRET>@${api_domain}/api/email-events/brevo"
+	echo "    (add it in your email provider's webhook settings for bounces and complaints)"
 fi
 if [ "$behind_cloudflare" = "yes" ]; then
 	echo "  - Re-enable the Cloudflare proxy (ORANGE cloud) now that certs are issued."
