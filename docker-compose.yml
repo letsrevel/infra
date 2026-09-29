@@ -159,6 +159,9 @@ services:
       - .env
     volumes:
       - ./media:/app/src/media
+      # Management commands run Django system checks: with OIDC_SIGNING_KEY_PATH set
+      # but the key not mounted here, every bot start would warn oauth.W002.
+      - ./certs:/app/certs:ro
     networks:
       - revel_network
     depends_on:

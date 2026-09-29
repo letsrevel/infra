@@ -34,6 +34,38 @@ yesno() {
 	[ "$answer" = "y" ] || [ "$answer" = "Y" ]
 }
 gen() { openssl rand -hex 32; }
+# OAuth / OIDC provider signing key (ADR-0008: the provider is on iff this key is
+# readable AND OAUTH_ISSUER is set). Created once and NEVER regenerated: a new key
+# invalidates every ID token already issued. The containers run as uid 997, so the
+# key must be 644 — an unreadable key leaves the provider off (the API keeps
+# serving) with an oauth.W002 warning from every management command.
+OIDC_KEY_FILE="certs/oidc.pem"
+ensure_oidc_key() {
+	local key="$1"
+	if [ -e "$key" ]; then
+		echo "Reusing the existing signing key ${key} (not regenerated)."
+	else
+		mkdir -p "$(dirname "$key")"
+		# stderr is discarded only to hide the keygen progress dots; failure still aborts.
+		if ! openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$key" 2>/dev/null; then
+			rm -f "$key"
+			echo "Could not generate ${key} (is certs/ writable?). Aborting."
+			exit 1
+		fi
+		echo "Generated ${key} (RSA 2048)."
+	fi
+	if chmod 644 "$key" 2>/dev/null; then
+		:
+	elif command -v sudo >/dev/null 2>&1 && {
+		echo "Making ${key} readable by the containers' user needs sudo."
+		sudo chmod 644 "$key"
+	}; then
+		:
+	else
+		warn "Could not chmod ${key} — the OAuth provider stays off (oauth.W002) until you run:"
+		warn "  sudo chmod 644 ${key}"
+	fi
+}
 # Exact health status: grepping `docker compose ps` for "healthy" also matches "unhealthy".
 web_healthy() {
 	[ "$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose ps -q web 2>/dev/null)" 2>/dev/null)" = "healthy" ]
@@ -265,6 +297,21 @@ if [ "$enable_observability" = "yes" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 5d. OAuth / OpenID Connect provider (optional) — off unless a signing key exists
+# ---------------------------------------------------------------------------
+say "OAuth / OpenID Connect provider (optional)"
+echo "Lets third-party apps and MCP hosts connect to Revel on a user's behalf, and"
+echo "lets other sites offer \"Sign in with\" this instance. Signs tokens with a key"
+echo "the wizard creates once in ${OIDC_KEY_FILE}."
+# Default to the current state on a re-run, so pressing Enter keeps an enabled provider on.
+oauth_default="n"
+[ -e "$OIDC_KEY_FILE" ] && oauth_default="y"
+enable_oauth_provider="no"
+if yesno "Enable the OAuth / OpenID Connect provider (third-party apps, MCP hosts, Sign in with <instance>)?" "$oauth_default"; then
+	enable_oauth_provider="yes"
+fi
+
+# ---------------------------------------------------------------------------
 # 6. Reverse proxy variant
 # ---------------------------------------------------------------------------
 say "Reverse proxy"
@@ -354,6 +401,9 @@ secret_key="$(gen)"
 salt_key="$(gen)"
 db_password="$(gen)"
 grafana_password="$(gen)"
+if [ "$enable_oauth_provider" = "yes" ]; then
+	ensure_oidc_key "$OIDC_KEY_FILE"
+fi
 
 # Compose profiles — one per enabled capability, matching the FEATURE_* flags (#19).
 profiles=""
@@ -430,6 +480,12 @@ say "Writing $ENV_FILE"
 		echo "GOOGLE_SSO_STAFF_LIST=${google_superuser_list}"
 	fi
 	echo "SSO_SHOW_FORM_ON_ADMIN_PAGE=${sso_show_form}"
+	if [ "$enable_oauth_provider" = "yes" ]; then
+		# ./certs is mounted at /app/certs. The issuer must be exactly the public API
+		# origin (no trailing slash) that serves /.well-known/openid-configuration.
+		echo "OIDC_SIGNING_KEY_PATH=/app/certs/oidc.pem"
+		echo "OAUTH_ISSUER=https://${api_domain}"
+	fi
 	echo ""
 	echo "EMAIL_DRY_RUN=${email_dry_run}"
 	echo "EMAIL_HOST=${email_host}"
@@ -628,6 +684,11 @@ if [ "$user_google_login" = "yes" ]; then
 fi
 if [ "$enable_observability" = "yes" ]; then
 	echo "  - Grafana:               https://${grafana_domain} (admin / see ${ENV_FILE})"
+fi
+if [ "$enable_oauth_provider" = "yes" ]; then
+	echo "  - OAuth provider:        https://${api_domain}/.well-known/openid-configuration"
+	echo "  - BACK UP ${OIDC_KEY_FILE} separately: it is not in the database backups, and"
+	echo "    losing it invalidates every ID token already issued."
 fi
 if [ "$behind_cloudflare" = "yes" ]; then
 	echo "  - Re-enable the Cloudflare proxy (ORANGE cloud) now that certs are issued."
