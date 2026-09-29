@@ -37,8 +37,8 @@ gen() { openssl rand -hex 32; }
 # OAuth / OIDC provider signing key (ADR-0008: the provider is on iff this key is
 # readable AND OAUTH_ISSUER is set). Created once and NEVER regenerated: a new key
 # invalidates every ID token already issued. The containers run as uid 997, so the
-# key must be 644 — an unreadable key fails the backend's oauth.E002 system check,
-# and with it web's startup migrate and the Telegram bot.
+# key must be 644 — an unreadable key leaves the provider off (the API keeps
+# serving) with an oauth.W002 warning from every management command.
 OIDC_KEY_FILE="certs/oidc.pem"
 ensure_oidc_key() {
 	local key="$1"
@@ -62,7 +62,7 @@ ensure_oidc_key() {
 	}; then
 		:
 	else
-		warn "Could not chmod ${key} — the backend refuses to start (oauth.E002) until you run:"
+		warn "Could not chmod ${key} — the OAuth provider stays off (oauth.W002) until you run:"
 		warn "  sudo chmod 644 ${key}"
 	fi
 }
