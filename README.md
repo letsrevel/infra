@@ -27,9 +27,9 @@ The wizard is interactive and has no unattended mode. It:
 
 1. Offers to install Docker (via `get.docker.com`) if it is missing, and checks that ports 80 and 443 are free.
 2. Suggests a tier from the detected CPU and RAM.
-3. Asks for the frontend and API domains, SMTP (or dry-run email) and which optional services to enable: observability (plus its Grafana domain), ClamAV, the Telegram bot, LLM questionnaire evaluation, Stripe, Google login and the login canary. It also asks whether you are behind Cloudflare.
+3. Asks for the frontend and API domains, SMTP (or dry-run email) and which optional services to enable: observability (plus its Grafana domain), ClamAV, the Telegram bot, LLM questionnaire evaluation, Stripe, Google login, the login canary and the OAuth / OpenID Connect provider. It also asks whether you are behind Cloudflare.
 4. Asks whether this is a single-organization instance (the default), which turns off public organization creation.
-5. Backs up any existing `.env`, writes a new one with generated secrets and picks the matching Caddyfile.
+5. Backs up any existing `.env`, writes a new one with generated secrets (plus, if the OAuth provider is on, a signing key in `certs/oidc.pem` that is created once and never replaced) and picks the matching Caddyfile.
 6. Downloads the city list (and, optionally, the 182 MB IP2Location LITE database), hands `media/`, `geo-data/` and `sentinel/` to the containers' user (see [Data directory ownership](#data-directory-ownership)), pulls the images from `ghcr.io/letsrevel` and runs `docker compose up -d`.
 7. Once the API is healthy, registers Stripe webhooks (if Stripe is enabled and `jq` is installed) and creates the admin user and first organization.
 
@@ -66,7 +66,7 @@ Optional services are Compose profiles, listed in `COMPOSE_PROFILES` in `.env`. 
 | `telegram` | telegram | `FEATURE_TELEGRAM` |
 | `canary` | canary (synthetic login check) | none |
 
-Flags with no service behind them: `FEATURE_LLM_EVALUATION` (with `LLM_*`), `FEATURE_ORGANIZATION_CREATION` (off for single-organization instances), Stripe keys, `OIDC_PROVIDERS` for user login through Google or any OpenID Connect provider, `GOOGLE_SSO_*` for the Django admin login, `APPLE_WALLET_*`, `GOOGLE_WALLET_*` and `INTEGRATIONS_EVENTBRITE_*`. All are optional. SMTP is optional too, but without it nobody receives verification or ticket emails. See [`.env.example`](.env.example) for every variable; its values document our own production deployment.
+Flags with no service behind them: `FEATURE_LLM_EVALUATION` (with `LLM_*`), `FEATURE_ORGANIZATION_CREATION` (off for single-organization instances), Stripe keys, `OIDC_PROVIDERS` for user login through Google or any OpenID Connect provider, `GOOGLE_SSO_*` for the Django admin login, `APPLE_WALLET_*`, `GOOGLE_WALLET_*`, `INTEGRATIONS_EVENTBRITE_*` and `OIDC_SIGNING_KEY_PATH` with `OAUTH_ISSUER` for the OAuth provider. All are optional. SMTP is optional too, but without it nobody receives verification or ticket emails. See [`.env.example`](.env.example) for every variable; its values document our own production deployment.
 
 The wizard asks for one Google OAuth client and uses it for two separate toggles. User-facing login writes `OIDC_PROVIDERS=google` with `OIDC_GOOGLE_ISSUER`, `OIDC_GOOGLE_CLIENT_ID` and `OIDC_GOOGLE_CLIENT_SECRET`; add `https://<API_DOMAIN>/api/auth/oidc/google/callback` as a redirect URI on that client. Admin login writes `GOOGLE_SSO_*`. To add another OpenID Connect provider, see [tiers and configuration](https://docs.letsrevel.io/self-hosting/tiers/).
 
@@ -105,6 +105,24 @@ chmod 644 certs/*.pem
 
 Google Wallet setup is in the [self-hosting docs](https://docs.letsrevel.io/self-hosting/#google-wallet-setup-one-time).
 
+### OAuth / OpenID Connect provider
+
+Revel can act as an OAuth 2.1 / OpenID Connect provider, so third-party apps and MCP hosts can act on a user's behalf and other sites can offer "Sign in with" your instance. It is off by default and turns on only when both `OIDC_SIGNING_KEY_PATH` points at a readable RSA private key and `OAUTH_ISSUER` is set; otherwise every `/o/*` and discovery route returns 404. The wizard asks about it (default: no) and, if you say yes, generates the key, sets both variables and applies the permissions. By hand:
+
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out certs/oidc.pem
+chmod 644 certs/oidc.pem
+```
+
+```
+OIDC_SIGNING_KEY_PATH=/app/certs/oidc.pem
+OAUTH_ISSUER=https://<API_DOMAIN>
+```
+
+`OAUTH_ISSUER` is exactly the public API origin, with no trailing slash. The key needs mode `644` for the same reason as the wallet certificates. If the containers cannot read it, the backend's `oauth.E002` check fails and `web` (which migrates on start) and the Telegram bot do not start. No Caddy changes are needed: the API site block already proxies `/o/*` and `/.well-known/*` to Django. To check it works, `https://<API_DOMAIN>/api/version` should report `features.oauth_provider: true`, and the `issuer` in `https://<API_DOMAIN>/.well-known/openid-configuration` should equal `OAUTH_ISSUER`.
+
+Never regenerate the key in place. A new key invalidates every ID token already issued; access and refresh tokens live in the database and are not affected. The wizard reuses an existing `certs/oidc.pem` on every re-run. To rotate, generate a new key, point `OIDC_SIGNING_KEY_PATH` at it and list the old path in `OIDC_SIGNING_KEYS_INACTIVE_PATHS` (comma-separated). Tuning variables are in [`.env.example`](.env.example).
+
 ## Operations
 
 ```bash
@@ -115,6 +133,8 @@ docker compose up -d --scale celery_default=4
 ```
 
 `deploy-rollout.sh` replaces containers with `docker-rollout` instead of stopping them first, `safe-reboot.sh` drains Celery tasks before rebooting the host and `ALERTING_SETUP.md` covers Pushover alerts and Grafana dashboards. Persistent data lives in named volumes (`revel_postgres_data`, `redis_data`, `caddy_data`, `caddy_config` and `clamav_data`, plus one per observability service). `docker compose down -v` deletes all of it.
+
+`./deploy.sh backup` covers the database only. Back up `.env` and `certs/` (wallet certificates and the OAuth signing key `certs/oidc.pem`) separately. Both are gitignored, so they are not in your clone's history either.
 
 Before exposing an instance: change every default password in `.env`, keep `.env` out of version control and keep the images updated.
 
