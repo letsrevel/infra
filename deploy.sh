@@ -42,16 +42,55 @@ fi
 
 echo -e "${YELLOW}Checking configuration...${NC}"
 
+# Body of a double-quoted .env value, decoded as Compose does: \a \b \f \n \r \t \v
+# \\ \" \$ become the character; any other \X is kept as is, backslash included.
+# Compose's \0ddd octal escapes aren't mirrored: vanishingly rare in a .env.
+dq_decode() {
+    local s="$1" out="" c
+    while [ -n "$s" ]; do
+        c="${s:0:1}" s="${s:1}"
+        if [ "$c" = "\\" ] && [ -n "$s" ]; then
+            c="${s:0:1}" s="${s:1}"
+            case "$c" in
+            a) c=$'\a' ;; b) c=$'\b' ;; f) c=$'\f' ;; n) c=$'\n' ;;
+            r) c=$'\r' ;; t) c=$'\t' ;; v) c=$'\v' ;;
+            \\ | \" | \$) ;;
+            *) c="\\$c" ;;
+            esac
+        fi
+        out+="$c"
+    done
+    printf '%s' "$out"
+}
+# Right-hand side of a KEY=value line, read the way Compose does: "..." decodes escapes
+# via dq_decode, '...' only turns \' into ', and anything after the closing quote (a
+# trailing comment) is ignored; an unquoted value stops at " #" and loses surrounding
+# whitespace. Regexes live in variables: bash 3.2 treats a quoted pattern literally.
+env_decode() {
+    local v="$1" dq='^"(([^"\\]|\\.)*)"' sq="^'(([^'\\\\]|\\\\.)*)'"
+    if [[ $v =~ $dq ]]; then
+        dq_decode "${BASH_REMATCH[1]}"
+    elif [[ $v =~ $sq ]]; then
+        printf '%s' "${BASH_REMATCH[1]}" | sed "s/\\\\'/'/g"
+    else
+        v="${v%% #*}"
+        v="${v#"${v%%[![:space:]]*}"}"
+        printf '%s' "${v%"${v##*[![:space:]]}"}"
+    fi
+}
+
 # Load environment variables. Parse line-by-line instead of sourcing so a
 # value with unquoted spaces or shell metacharacters can't break the script.
+# Exported values win over .env when Compose interpolates ${VAR} (WEB_MEM_LIMIT,
+# CANARY_PASSWORD, ...), so each value must reach the shell exactly as Compose
+# would read it: a value setup.sh escaped ("p\$ss") decoded to p$ss (#56), and
+# an inline comment or trailing whitespace dropped rather than passed through.
 while IFS= read -r line; do
     [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+    [[ "$line" == *=* ]] || continue
     key="${line%%=*}"
-    value="${line#*=}"
     [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-    # Strip optional surrounding quotes
-    value="${value#\"}" && value="${value%\"}"
-    value="${value#\'}" && value="${value%\'}"
+    value="$(env_decode "${line#*=}")"
     export "$key=$value"
 done < .env
 

@@ -34,11 +34,59 @@ yesno() {
 	[ "$answer" = "y" ] || [ "$answer" = "Y" ]
 }
 gen() { openssl rand -hex 32; }
+# Double-quoted .env value, escaped for Docker Compose's dotenv parser: \ " and $ get a
+# backslash, so any user input (SMTP passwords with $, quotes, # or spaces) reaches the
+# containers unchanged instead of being interpolated or cut at a comment (#56). Not
+# single quotes: Compose rejects the shell's '\'' and a single-quoted value can't end
+# in a backslash.
+env_quote() {
+	local v="$1"
+	v="${v//\\/\\\\}"
+	v="${v//\"/\\\"}"
+	v="${v//\$/\\\$}"
+	printf '"%s"' "$v"
+}
+# Body of a double-quoted .env value, decoded as Compose does: \a \b \f \n \r \t \v
+# \\ \" \$ become the character; any other \X is kept as is, backslash included.
+# Compose's \0ddd octal escapes aren't mirrored: wizard values never contain them.
+dq_decode() {
+	local s="$1" out="" c
+	while [ -n "$s" ]; do
+		c="${s:0:1}" s="${s:1}"
+		if [ "$c" = "\\" ] && [ -n "$s" ]; then
+			c="${s:0:1}" s="${s:1}"
+			case "$c" in
+			a) c=$'\a' ;; b) c=$'\b' ;; f) c=$'\f' ;; n) c=$'\n' ;;
+			r) c=$'\r' ;; t) c=$'\t' ;; v) c=$'\v' ;;
+			\\ | \" | \$) ;;
+			*) c="\\$c" ;;
+			esac
+		fi
+		out+="$c"
+	done
+	printf '%s' "$out"
+}
+# Right-hand side of a KEY=value line, read the way Compose does: "..." decodes escapes
+# via dq_decode (undoes env_quote), '...' only turns \' into ', and anything after the
+# closing quote (a trailing comment) is ignored; an unquoted value stops at " #" and loses
+# surrounding whitespace. Regexes live in variables: bash 3.2 treats a quoted pattern literally.
+env_decode() {
+	local v="$1" dq='^"(([^"\\]|\\.)*)"' sq="^'(([^'\\\\]|\\\\.)*)'"
+	if [[ $v =~ $dq ]]; then
+		dq_decode "${BASH_REMATCH[1]}"
+	elif [[ $v =~ $sq ]]; then
+		printf '%s' "${BASH_REMATCH[1]}" | sed "s/\\\\'/'/g"
+	else
+		v="${v%% #*}"
+		v="${v#"${v%%[![:space:]]*}"}"
+		printf '%s' "${v%"${v##*[![:space:]]}"}"
+	fi
+}
 # Current value of VAR in the existing .env (empty if unset or no .env yet), so a
-# re-run can offer it as the default. Last assignment wins; surrounding quotes stripped.
+# re-run can offer it as the default. Last assignment wins.
 env_value() {
 	[ -f "$ENV_FILE" ] || return 0
-	sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1 | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
+	env_decode "$(sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1)"
 }
 # OAuth / OIDC provider signing key (ADR-0008: the provider is on iff this key is
 # readable AND OAUTH_ISSUER is set). Created once and NEVER regenerated: a new key
@@ -500,14 +548,14 @@ say "Writing $ENV_FILE"
 	fi
 	if [ -n "$google_client_id" ]; then
 		echo "GOOGLE_SSO_CLIENT_ID=${google_client_id}"
-		echo "GOOGLE_SSO_CLIENT_SECRET=${google_client_secret}"
+		echo "GOOGLE_SSO_CLIENT_SECRET=$(env_quote "$google_client_secret")"
 	fi
 	if [ "$user_google_login" = "yes" ]; then
 		# User login goes through the generic OpenID Connect flow, reusing the same Google client.
 		echo "OIDC_PROVIDERS=google"
 		echo "OIDC_GOOGLE_ISSUER=https://accounts.google.com"
 		echo "OIDC_GOOGLE_CLIENT_ID=${google_client_id}"
-		echo "OIDC_GOOGLE_CLIENT_SECRET=${google_client_secret}"
+		echo "OIDC_GOOGLE_CLIENT_SECRET=$(env_quote "$google_client_secret")"
 	fi
 	if [ "$admin_sso" = "yes" ]; then
 		echo "GOOGLE_SSO_SUPERUSER_LIST=${google_superuser_list}"
@@ -524,10 +572,10 @@ say "Writing $ENV_FILE"
 	echo "EMAIL_DRY_RUN=${email_dry_run}"
 	echo "EMAIL_HOST=${email_host}"
 	echo "EMAIL_PORT=${email_port}"
-	echo "EMAIL_HOST_USER=${email_user}"
-	echo "EMAIL_HOST_PASSWORD=${email_password}"
+	echo "EMAIL_HOST_USER=$(env_quote "$email_user")"
+	echo "EMAIL_HOST_PASSWORD=$(env_quote "$email_password")"
 	echo "EMAIL_USE_TLS=True"
-	echo "DEFAULT_FROM_EMAIL=\"${default_from}\""
+	echo "DEFAULT_FROM_EMAIL=$(env_quote "$default_from")"
 	if [ -n "$org_email_domain" ]; then
 		# Dedicated sending domain for org-pushed mail; unset = domain of DEFAULT_FROM_EMAIL.
 		echo "ORG_EMAIL_DOMAIN=${org_email_domain}"
@@ -537,11 +585,11 @@ say "Writing $ENV_FILE"
 		echo "EMAIL_WEBHOOK_SECRET=${email_webhook_secret}"
 	fi
 	echo ""
-	echo "TELEGRAM_BOT_TOKEN=${telegram_token}"
+	echo "TELEGRAM_BOT_TOKEN=$(env_quote "$telegram_token")"
 	echo "LLM_DEFAULT_MODEL=${llm_model}"
-	echo "LLM_API_KEY=${llm_api_key}"
+	echo "LLM_API_KEY=$(env_quote "$llm_api_key")"
 	echo ""
-	echo "STRIPE_SECRET_KEY=${stripe_secret}"
+	echo "STRIPE_SECRET_KEY=$(env_quote "$stripe_secret")"
 	echo "STRIPE_ACCOUNT=${stripe_account}"
 	echo "DEFAULT_CURRENCY=${default_currency}"
 	echo ""
@@ -550,7 +598,7 @@ say "Writing $ENV_FILE"
 	if [ "$enable_canary" = "yes" ]; then
 		echo ""
 		echo "CANARY_EMAIL=${canary_email}"
-		echo "CANARY_PASSWORD=${canary_password}"
+		echo "CANARY_PASSWORD=$(env_quote "$canary_password")"
 	fi
 	echo ""
 	echo "# Resource limits & tuning (${tier}-tier suggestions; edit to re-size)."

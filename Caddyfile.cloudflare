@@ -17,6 +17,31 @@
 		trusted_proxies static 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
 		client_ip_headers Cf-Connecting-Ip
 	}
+
+	# Redact bearer credentials from every Caddy log line (infra#55).
+	# Unsubscribe/opt-out links (`?token=`, a JWT carrying the recipient's
+	# email, valid ~10 years), password-reset / confirm-email / impersonation
+	# links (`?token=`), signed media URLs (`?sig=`) and the OAuth/OIDC login
+	# callbacks (`?code=`, replayable until redeemed) all travel in query
+	# strings. There is no `log` directive, so no access log is written, but
+	# `http.log.error` (e.g. a 502 while an upstream restarts) still dumps the
+	# full request: uri plus the Referer, which carries the page URL. Filtering
+	# the default logger scrubs them before they reach `docker logs`. The key
+	# stays visible so you can tell a token was present.
+	log default {
+		format filter {
+			request>uri query {
+				replace token REDACTED
+				replace sig REDACTED
+				replace code REDACTED
+			}
+			request>headers>Referer query {
+				replace token REDACTED
+				replace sig REDACTED
+				replace code REDACTED
+			}
+		}
+	}
 }
 
 # -------------------------------------------------------

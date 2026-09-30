@@ -57,6 +57,14 @@ services:
       - "8000"
     env_file:
       - .env
+    environment:
+      # Don't trace the one-click unsubscribe endpoint (infra#55). Its URL
+      # carries `?token=`, a JWT holding the recipient's email and valid for
+      # ~10 years, and the Django instrumentation records the raw request
+      # target (`http.target`, query included) on every sampled span, so it
+      # would sit in Tempo for 30 days. Regex, matched against the URL without
+      # its query string.
+      OTEL_PYTHON_DJANGO_EXCLUDED_URLS: "api/notification-preferences/one-click"
     volumes:
       - ./media:/app/src/media
       - ./geo-data:/app/src/geo/data
