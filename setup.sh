@@ -212,9 +212,18 @@ if yesno "Configure real SMTP now? (no = console/dry-run for testing)" n; then
 	existing_webhook_secret="$(env_value EMAIL_WEBHOOK_SECRET)"
 	webhook_prompt="Email-provider webhook secret for bounces/complaints (optional, blank = off)"
 	[ -n "$existing_webhook_secret" ] && webhook_prompt="Email-provider webhook secret for bounces/complaints (blank = keep current, 'none' = off)"
-	email_webhook_secret="$(ask_secret "$webhook_prompt")"
-	[ -z "$email_webhook_secret" ] && email_webhook_secret="$existing_webhook_secret"
-	[ "$email_webhook_secret" = "none" ] && email_webhook_secret=""
+	# The secret goes into the provider's webhook URL (basic auth) and an unquoted .env line,
+	# so only URL-safe characters are accepted (no '$', '@', ':' or quotes). Generate one with
+	# `openssl rand -hex 32`.
+	while :; do
+		email_webhook_secret="$(ask_secret "$webhook_prompt")"
+		[ -z "$email_webhook_secret" ] && email_webhook_secret="$existing_webhook_secret"
+		[ "$email_webhook_secret" = "none" ] && email_webhook_secret=""
+		case "$email_webhook_secret" in
+		*[!A-Za-z0-9._~-]*) echo "Use only letters, digits and . _ ~ - (e.g. the output of: openssl rand -hex 32)." ;;
+		*) break ;;
+		esac
+	done
 fi
 
 # ---------------------------------------------------------------------------
