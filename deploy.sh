@@ -49,9 +49,15 @@ while IFS= read -r line; do
     key="${line%%=*}"
     value="${line#*=}"
     [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-    # Strip optional surrounding quotes
-    value="${value#\"}" && value="${value%\"}"
-    value="${value#\'}" && value="${value%\'}"
+    # Decode quotes the way Compose does. Exported values win over .env when
+    # Compose interpolates ${VAR} (e.g. CANARY_PASSWORD), so a value setup.sh
+    # escaped ("p\$ss") must reach the shell decoded ("p$ss"): "..." drops the
+    # backslash from each \X, '...' only turns \' into ' (#56).
+    if [[ "$value" == \"*\" ]]; then
+        value="$(printf '%s' "${value:1:${#value}-2}" | sed 's/\\\(.\)/\1/g')"
+    elif [[ "$value" == \'*\' ]]; then
+        value="$(printf '%s' "${value:1:${#value}-2}" | sed "s/\\\\'/'/g")"
+    fi
     export "$key=$value"
 done < .env
 

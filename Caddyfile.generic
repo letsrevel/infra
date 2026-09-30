@@ -8,6 +8,28 @@
 	servers {
 		max_header_size 16KB
 	}
+
+	# Redact bearer credentials from every Caddy log line (infra#55).
+	# Unsubscribe/opt-out links (`?token=`, a JWT carrying the recipient's
+	# email, valid ~10 years), password-reset / confirm-email / impersonation
+	# links (`?token=`) and signed media URLs (`?sig=`) all travel in query
+	# strings. There is no `log` directive, so no access log is written, but
+	# `http.log.error` (e.g. a 502 while an upstream restarts) still dumps the
+	# full request: uri plus the Referer, which carries the page URL. Filtering
+	# the default logger scrubs them before they reach `docker logs`. The key
+	# stays visible so you can tell a token was present.
+	log default {
+		format filter {
+			request>uri query {
+				replace token REDACTED
+				replace sig REDACTED
+			}
+			request>headers>Referer query {
+				replace token REDACTED
+				replace sig REDACTED
+			}
+		}
+	}
 }
 # -------------------------------------------------------
 # Revel Frontend
