@@ -62,23 +62,35 @@ dq_decode() {
     done
     printf '%s' "$out"
 }
+# Right-hand side of a KEY=value line, read the way Compose does: "..." decodes escapes
+# via dq_decode, '...' only turns \' into ', and anything after the closing quote (a
+# trailing comment) is ignored; an unquoted value stops at " #" and loses surrounding
+# whitespace. Regexes live in variables: bash 3.2 treats a quoted pattern literally.
+env_decode() {
+    local v="$1" dq='^"(([^"\\]|\\.)*)"' sq="^'(([^'\\\\]|\\\\.)*)'"
+    if [[ $v =~ $dq ]]; then
+        dq_decode "${BASH_REMATCH[1]}"
+    elif [[ $v =~ $sq ]]; then
+        printf '%s' "${BASH_REMATCH[1]}" | sed "s/\\\\'/'/g"
+    else
+        v="${v%% #*}"
+        v="${v#"${v%%[![:space:]]*}"}"
+        printf '%s' "${v%"${v##*[![:space:]]}"}"
+    fi
+}
 
 # Load environment variables. Parse line-by-line instead of sourcing so a
 # value with unquoted spaces or shell metacharacters can't break the script.
+# Exported values win over .env when Compose interpolates ${VAR} (WEB_MEM_LIMIT,
+# CANARY_PASSWORD, ...), so each value must reach the shell exactly as Compose
+# would read it: a value setup.sh escaped ("p\$ss") decoded to p$ss (#56), and
+# an inline comment or trailing whitespace dropped rather than passed through.
 while IFS= read -r line; do
     [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+    [[ "$line" == *=* ]] || continue
     key="${line%%=*}"
-    value="${line#*=}"
     [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-    # Decode quotes the way Compose does. Exported values win over .env when
-    # Compose interpolates ${VAR} (e.g. CANARY_PASSWORD), so a value setup.sh
-    # escaped ("p\$ss") must reach the shell decoded ("p$ss"): "..." decodes
-    # escapes via dq_decode, '...' only turns \' into ' (#56).
-    if [[ "$value" == \"*\" ]]; then
-        value="$(dq_decode "${value:1:${#value}-2}")"
-    elif [[ "$value" == \'*\' ]]; then
-        value="$(printf '%s' "${value:1:${#value}-2}" | sed "s/\\\\'/'/g")"
-    fi
+    value="$(env_decode "${line#*=}")"
     export "$key=$value"
 done < .env
 

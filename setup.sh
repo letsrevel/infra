@@ -66,18 +66,27 @@ dq_decode() {
 	done
 	printf '%s' "$out"
 }
+# Right-hand side of a KEY=value line, read the way Compose does: "..." decodes escapes
+# via dq_decode (undoes env_quote), '...' only turns \' into ', and anything after the
+# closing quote (a trailing comment) is ignored; an unquoted value stops at " #" and loses
+# surrounding whitespace. Regexes live in variables: bash 3.2 treats a quoted pattern literally.
+env_decode() {
+	local v="$1" dq='^"(([^"\\]|\\.)*)"' sq="^'(([^'\\\\]|\\\\.)*)'"
+	if [[ $v =~ $dq ]]; then
+		dq_decode "${BASH_REMATCH[1]}"
+	elif [[ $v =~ $sq ]]; then
+		printf '%s' "${BASH_REMATCH[1]}" | sed "s/\\\\'/'/g"
+	else
+		v="${v%% #*}"
+		v="${v#"${v%%[![:space:]]*}"}"
+		printf '%s' "${v%"${v##*[![:space:]]}"}"
+	fi
+}
 # Current value of VAR in the existing .env (empty if unset or no .env yet), so a
-# re-run can offer it as the default. Last assignment wins. Quotes are decoded the way
-# Compose reads them: "..." via dq_decode (undoes env_quote), '...' only turns \' into '.
+# re-run can offer it as the default. Last assignment wins.
 env_value() {
 	[ -f "$ENV_FILE" ] || return 0
-	local v
-	v="$(sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1)"
-	case "$v" in
-	\"*\") dq_decode "${v:1:${#v}-2}" ;;
-	\'*\') printf '%s' "${v:1:${#v}-2}" | sed "s/\\\\'/'/g" ;;
-	*) printf '%s' "$v" ;;
-	esac
+	env_decode "$(sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1)"
 }
 # OAuth / OIDC provider signing key (ADR-0008: the provider is on iff this key is
 # readable AND OAUTH_ISSUER is set). Created once and NEVER regenerated: a new key

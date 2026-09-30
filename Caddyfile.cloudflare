@@ -21,7 +21,8 @@
 	# Redact bearer credentials from every Caddy log line (infra#55).
 	# Unsubscribe/opt-out links (`?token=`, a JWT carrying the recipient's
 	# email, valid ~10 years), password-reset / confirm-email / impersonation
-	# links (`?token=`) and signed media URLs (`?sig=`) all travel in query
+	# links (`?token=`), signed media URLs (`?sig=`) and the OAuth/OIDC login
+	# callbacks (`?code=`, replayable until redeemed) all travel in query
 	# strings. There is no `log` directive, so no access log is written, but
 	# `http.log.error` (e.g. a 502 while an upstream restarts) still dumps the
 	# full request: uri plus the Referer, which carries the page URL. Filtering
@@ -32,10 +33,12 @@
 			request>uri query {
 				replace token REDACTED
 				replace sig REDACTED
+				replace code REDACTED
 			}
 			request>headers>Referer query {
 				replace token REDACTED
 				replace sig REDACTED
+				replace code REDACTED
 			}
 		}
 	}
