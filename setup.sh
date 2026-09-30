@@ -46,16 +46,35 @@ env_quote() {
 	v="${v//\$/\\\$}"
 	printf '"%s"' "$v"
 }
+# Body of a double-quoted .env value, decoded as Compose does: \a \b \f \n \r \t \v
+# \\ \" \$ become the character; any other \X is kept as is, backslash included.
+# Compose's \0ddd octal escapes aren't mirrored: wizard values never contain them.
+dq_decode() {
+	local s="$1" out="" c
+	while [ -n "$s" ]; do
+		c="${s:0:1}" s="${s:1}"
+		if [ "$c" = "\\" ] && [ -n "$s" ]; then
+			c="${s:0:1}" s="${s:1}"
+			case "$c" in
+			a) c=$'\a' ;; b) c=$'\b' ;; f) c=$'\f' ;; n) c=$'\n' ;;
+			r) c=$'\r' ;; t) c=$'\t' ;; v) c=$'\v' ;;
+			\\ | \" | \$) ;;
+			*) c="\\$c" ;;
+			esac
+		fi
+		out+="$c"
+	done
+	printf '%s' "$out"
+}
 # Current value of VAR in the existing .env (empty if unset or no .env yet), so a
 # re-run can offer it as the default. Last assignment wins. Quotes are decoded the way
-# Compose reads them: "..." drops the backslash from each \X (undoing env_quote), '...'
-# only turns \' into '.
+# Compose reads them: "..." via dq_decode (undoes env_quote), '...' only turns \' into '.
 env_value() {
 	[ -f "$ENV_FILE" ] || return 0
 	local v
 	v="$(sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1)"
 	case "$v" in
-	\"*\") printf '%s' "${v:1:${#v}-2}" | sed 's/\\\(.\)/\1/g' ;;
+	\"*\") dq_decode "${v:1:${#v}-2}" ;;
 	\'*\') printf '%s' "${v:1:${#v}-2}" | sed "s/\\\\'/'/g" ;;
 	*) printf '%s' "$v" ;;
 	esac

@@ -42,6 +42,27 @@ fi
 
 echo -e "${YELLOW}Checking configuration...${NC}"
 
+# Body of a double-quoted .env value, decoded as Compose does: \a \b \f \n \r \t \v
+# \\ \" \$ become the character; any other \X is kept as is, backslash included.
+# Compose's \0ddd octal escapes aren't mirrored: vanishingly rare in a .env.
+dq_decode() {
+    local s="$1" out="" c
+    while [ -n "$s" ]; do
+        c="${s:0:1}" s="${s:1}"
+        if [ "$c" = "\\" ] && [ -n "$s" ]; then
+            c="${s:0:1}" s="${s:1}"
+            case "$c" in
+            a) c=$'\a' ;; b) c=$'\b' ;; f) c=$'\f' ;; n) c=$'\n' ;;
+            r) c=$'\r' ;; t) c=$'\t' ;; v) c=$'\v' ;;
+            \\ | \" | \$) ;;
+            *) c="\\$c" ;;
+            esac
+        fi
+        out+="$c"
+    done
+    printf '%s' "$out"
+}
+
 # Load environment variables. Parse line-by-line instead of sourcing so a
 # value with unquoted spaces or shell metacharacters can't break the script.
 while IFS= read -r line; do
@@ -51,10 +72,10 @@ while IFS= read -r line; do
     [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
     # Decode quotes the way Compose does. Exported values win over .env when
     # Compose interpolates ${VAR} (e.g. CANARY_PASSWORD), so a value setup.sh
-    # escaped ("p\$ss") must reach the shell decoded ("p$ss"): "..." drops the
-    # backslash from each \X, '...' only turns \' into ' (#56).
+    # escaped ("p\$ss") must reach the shell decoded ("p$ss"): "..." decodes
+    # escapes via dq_decode, '...' only turns \' into ' (#56).
     if [[ "$value" == \"*\" ]]; then
-        value="$(printf '%s' "${value:1:${#value}-2}" | sed 's/\\\(.\)/\1/g')"
+        value="$(dq_decode "${value:1:${#value}-2}")"
     elif [[ "$value" == \'*\' ]]; then
         value="$(printf '%s' "${value:1:${#value}-2}" | sed "s/\\\\'/'/g")"
     fi
