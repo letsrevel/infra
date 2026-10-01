@@ -7,7 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **ABSOLUTELY FORBIDDEN COMMANDS:**
 - **NEVER** run `git commit` or `git push` on main. ALWAYS open PRs.
 - **NEVER** perform `ssh` or `scp` operations on the server without the user giving you explicit permissions
-- The user will manually handle all git operations and file transfers to the server
+- On non-`main` branches, commit, push and open PRs freely (decided 2026-10-01). The only gate is merging: **merge only when the user explicitly approves it** (or they merge themselves)
+- The user handles file transfers to the server
 
 ## Working Environment
 
