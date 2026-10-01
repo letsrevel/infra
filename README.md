@@ -72,10 +72,11 @@ The wizard asks for one Google OAuth client and uses it for two separate toggles
 
 ### Email
 
-Any SMTP provider works; letsrevel.io uses the Brevo SMTP relay (`smtp-relay.brevo.com`, port 587, TLS). Two optional variables sit next to the SMTP settings:
+Any SMTP provider works; letsrevel.io uses the Brevo SMTP relay (`smtp-relay.brevo.com`, port 587, TLS). A few optional variables sit next to the SMTP settings:
 
 - `ORG_EMAIL_DOMAIN`: a dedicated sending domain (for example `mail.<your domain>`) for mail that organizations send to people: announcements, invitations, event updates and reminders. This keeps its reputation apart from account mail such as verification, password reset and tickets. Unset, that mail uses the domain of `DEFAULT_FROM_EMAIL`. Authenticate the domain (DKIM and DMARC) at your SMTP provider before you set it. It needs no MX record, but do not publish a null MX: RFC 7505 says a null-MX domain should not be used as a From domain.
 - `EMAIL_WEBHOOK_SECRET`: turns on the bounce and complaint webhook at `POST https://<API_DOMAIN>/api/email-events/brevo`. The endpoint accepts `Authorization: Bearer <secret>` or basic auth with the secret as password, so in Brevo's webhook settings you can use `https://revel:<secret>@<API_DOMAIN>/api/email-events/brevo`. Unset, the endpoint returns 404.
+- `ORG_NUDGE_REPLY_TO` and `ORG_NUDGE_SIGNATURE`: Reply-To and check-in signature for the org setup nudges, which are short reminders to owners of stalled organizations (private profile, forgotten draft, no events, gone quiet). Without a Reply-To the emails still go out, but the personal "what's in the way?" check-in never does. The daily task ships disabled: preview with `docker compose exec web python manage.py org_nudges`, then enable "Send org setup nudges" under Periodic tasks in the Django admin.
 
 ### Caddyfiles
 
