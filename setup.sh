@@ -238,6 +238,8 @@ email_user=""
 email_password=""
 org_email_domain=""
 email_webhook_secret=""
+org_nudge_reply_to=""
+org_nudge_signature=""
 default_from="Revel <noreply@${frontend_domain}>"
 if yesno "Configure real SMTP now? (no = console/dry-run for testing)" n; then
 	email_dry_run="False"
@@ -272,6 +274,17 @@ if yesno "Configure real SMTP now? (no = console/dry-run for testing)" n; then
 		*) break ;;
 		esac
 	done
+
+	# Org setup nudges (capped reminders to owners of stalled organizations) carry this
+	# Reply-To so owners can answer a person. Blank = no Reply-To, and the personal
+	# check-in nudge stays off.
+	echo "Setup nudges to owners of stalled organizations can be answered by email."
+	org_nudge_reply_to="$(ask "Reply-To address for org setup nudges (optional)" "$(env_value ORG_NUDGE_REPLY_TO)")"
+	[ "$org_nudge_reply_to" = "none" ] && org_nudge_reply_to=""
+	if [ -n "$org_nudge_reply_to" ]; then
+		existing_signature="$(env_value ORG_NUDGE_SIGNATURE)"
+		org_nudge_signature="$(ask "Name that signs the personal check-in nudge" "${existing_signature:-The Revel team}")"
+	fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -584,6 +597,11 @@ say "Writing $ENV_FILE"
 		# Bounce/complaint webhook: POST https://${api_domain}/api/email-events/brevo
 		echo "EMAIL_WEBHOOK_SECRET=${email_webhook_secret}"
 	fi
+	if [ -n "$org_nudge_reply_to" ]; then
+		# Org setup nudges: Reply-To + check-in signature (the beat task ships disabled).
+		echo "ORG_NUDGE_REPLY_TO=$(env_quote "$org_nudge_reply_to")"
+		echo "ORG_NUDGE_SIGNATURE=$(env_quote "$org_nudge_signature")"
+	fi
 	echo ""
 	echo "TELEGRAM_BOT_TOKEN=$(env_quote "$telegram_token")"
 	echo "LLM_DEFAULT_MODEL=${llm_model}"
@@ -783,6 +801,10 @@ fi
 if [ -n "$email_webhook_secret" ]; then
 	echo "  - Bounce webhook:        https://revel:<EMAIL_WEBHOOK_SECRET>@${api_domain}/api/email-events/brevo"
 	echo "    (add it in your email provider's webhook settings for bounces and complaints)"
+fi
+if [ -n "$org_nudge_reply_to" ]; then
+	echo "  - Org setup nudges:      preview with 'docker compose exec web python manage.py org_nudges',"
+	echo "    then enable 'Send org setup nudges' in Django admin > Periodic tasks (it ships disabled)."
 fi
 if [ "$behind_cloudflare" = "yes" ]; then
 	echo "  - Re-enable the Cloudflare proxy (ORANGE cloud) now that certs are issued."
