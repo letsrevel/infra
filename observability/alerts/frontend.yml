@@ -27,7 +27,12 @@ groups:
 
       # High 5xx share of SvelteKit-served responses
       - alert: FrontendHighErrorRate
-        expr: (sum(rate(frontend_http_requests_total{status=~"5.."}[5m])) / sum(rate(frontend_http_requests_total[5m]))) * 100 > 5
+        # The absolute floor (>= 5 5xx in 5m) keeps a handful of errors on a
+        # quiet instance (a few req/min) from tripping the ratio and paging.
+        expr: |
+          (sum(rate(frontend_http_requests_total{status=~"5.."}[5m])) / sum(rate(frontend_http_requests_total[5m]))) * 100 > 5
+          and
+          sum(increase(frontend_http_requests_total{status=~"5.."}[5m])) >= 5
         for: 5m
         labels:
           severity: critical
