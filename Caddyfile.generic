@@ -187,6 +187,15 @@
 
 	encode zstd gzip
 
+	# --- Drop vuln-scanner probes at the edge ---
+	# Bots probe the API host for dotfiles, PHP shells and dev-server paths.
+	# Answering here keeps them out of Django's response metrics, where they
+	# inflated the HighHTTP4xxRate ratio. Real API routes all live under /api/.
+	@scanner_probe path *.php *.phtml *.asp *.aspx *.jsp *.cgi /.env* /.git* /.svn* /.hg* /.DS_Store /wp-* /wordpress* /@fs/* /__vite* /userfiles* /webhook* /feast/* /form/*
+	handle @scanner_probe {
+		respond 404
+	}
+
 	# Block access to metrics endpoint (internal use only)
 	handle /metrics* {
 		respond "Not Found" 404
