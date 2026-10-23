@@ -258,6 +258,9 @@
 			# any client-sent copy) and we echo it. Replaces the origin that was
 			# pinned to FRONTEND_DOMAIN, which broke media on custom domains (infra#67).
 			# forward_auth sends preflights as GET too, so OPTIONS is covered.
+			# Drop any client-sent copy first (older Caddy versions' copy_headers
+			# only overwrite it when Django answers with the header).
+			request_header -X-Revel-Cors-Origin
 			# Note: handle_path strips /media/protected from {uri}, so we add /protected back
 			forward_auth web:8000 {
 				uri /api/media/validate/protected{uri}
