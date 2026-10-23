@@ -21,12 +21,15 @@
 	# On-demand TLS for organization custom domains (white-label, infra#67).
 	# Only the `https://` catch-all at the end of this file uses it; every named
 	# site keeps its normal certificate. Before issuing a certificate for an
-	# unknown hostname Caddy asks the loopback endpoint at the end of this file,
-	# which answers 200 only for an ACTIVE custom domain (Revel's by-domain
-	# lookup), so nobody can make this server request certificates for arbitrary
-	# names. With no active custom domains the catch-all is inert.
+	# unknown hostname Caddy calls the backend's dedicated ask endpoint
+	# (`GET /api/tls/ask?domain=<host>`, revel-backend#1178) straight over the
+	# docker network. It answers 200 only for an ACTIVE custom domain whose
+	# organization has custom_domain_enabled, 404 otherwise, and it is
+	# unthrottled and cached, so junk handshakes cannot starve real tenants and
+	# nobody can make this server request certificates for arbitrary names.
+	# With no active custom domains the catch-all is inert.
 	on_demand_tls {
-		ask http://127.0.0.1:9180/revel-custom-domain-ask
+		ask http://web:8000/api/tls/ask
 	}
 
 	# Redact bearer credentials from every Caddy log line (infra#55).
@@ -362,7 +365,8 @@
 # so this only sees hostnames no block above claims. Cloudflare for SaaS connects with
 # SNI = Host = the customer hostname and, under Full (strict), needs a publicly
 # trusted certificate for that name: on-demand TLS gets one from Let's Encrypt,
-# gated by the ask endpoint below. TLS-ALPN cannot pass through Cloudflare's
+# gated by the ask endpoint
+# configured in the global options. TLS-ALPN cannot pass through Cloudflare's
 # proxy, so only HTTP-01 is used (Cloudflare forwards port 80).
 https:// {
 	tls {
@@ -373,33 +377,6 @@ https:// {
 	}
 
 	# Not our domains: no includeSubDomains, no preload.
-	header Strict-Transport-Security "max-age=31536000"
+	header Strict-Transport-Security "max-age=86400"
 	import revel_frontend
-}
-
-# The on_demand_tls "ask" endpoint (global options). Caddy calls
-# GET /revel-custom-domain-ask?domain=<host>; we turn it into the API's public
-# by-domain lookup, which answers 200 only for an ACTIVE custom domain whose
-# organization has custom_domain_enabled, 404 otherwise. Loopback only. The
-# regexp refuses anything that is not a plain lowercase hostname before it
-# reaches Django.
-# ponytail: by-domain is anonymous-throttled (all asks share one IP); a
-# dedicated ask endpoint (revel-backend#1178) is the upgrade path.
-http://127.0.0.1:9180 {
-	bind 127.0.0.1
-
-	@custom_domain_ask {
-		path /revel-custom-domain-ask
-		vars_regexp {query.domain} ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$
-	}
-	handle @custom_domain_ask {
-		rewrite * /api/organizations/by-domain/{query.domain}
-		reverse_proxy web:8000 {
-			header_up Host {$API_DOMAIN}
-			header_up X-Forwarded-Proto https
-		}
-	}
-	handle {
-		respond 404
-	}
 }
