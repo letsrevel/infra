@@ -18,6 +18,17 @@
 		client_ip_headers Cf-Connecting-Ip
 	}
 
+	# On-demand TLS for organization custom domains (white-label, infra#67).
+	# Only the `https://` catch-all at the end of this file uses it; every named
+	# site keeps its normal certificate. Before issuing a certificate for an
+	# unknown hostname Caddy asks the loopback endpoint at the end of this file,
+	# which answers 200 only for an ACTIVE custom domain (Revel's by-domain
+	# lookup), so nobody can make this server request certificates for arbitrary
+	# names. With no active custom domains the catch-all is inert.
+	on_demand_tls {
+		ask http://127.0.0.1:9180/revel-custom-domain-ask
+	}
+
 	# Redact bearer credentials from every Caddy log line (infra#55).
 	# Unsubscribe/opt-out links (`?token=`, a JWT carrying the recipient's
 	# email, valid ~10 years), password-reset / confirm-email / impersonation
@@ -47,11 +58,14 @@
 # -------------------------------------------------------
 # Revel Frontend
 # -------------------------------------------------------
-{$FRONTEND_DOMAIN} {
+# Everything the frontend serves, shared by the platform host and the
+# organization custom-domain catch-all (end of file) so the two can never
+# drift apart. HSTS is NOT in here: each site sets its own, because custom
+# domains must not get includeSubDomains/preload (infra#67).
+(revel_frontend) {
 	encode zstd gzip
 
 	# --- Security headers (applied to all responses) ---
-	header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 	header X-Content-Type-Options "nosniff"
 	header Cross-Origin-Resource-Policy "same-origin"
 	header Permissions-Policy "camera=(), microphone=(), usb=()"
@@ -82,6 +96,12 @@
 				keepalive_idle_conns 32
 				max_conns_per_host 100
 			}
+			# Tenant mode: the frontend (HOST_HEADER / PROTOCOL_HEADER) reads the
+			# public host and scheme from these to pick the organization. Set
+			# explicitly to OVERWRITE client values: a trusted proxy's
+			# X-Forwarded-Host would otherwise pass through unchanged (infra#67).
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto https
 		}
 		header Cache-Control "no-cache"
 	}
@@ -100,6 +120,8 @@
 				keepalive_idle_conns 32
 				max_conns_per_host 100
 			}
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto https
 		}
 		header Cache-Control "public, max-age=3600, stale-while-revalidate=86400"
 		# Embedding sites load these via <script src> — a cross-origin no-cors
@@ -124,6 +146,8 @@
 				keepalive_idle_conns 32
 				max_conns_per_host 100
 			}
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto https
 			# Static assets can be buffered (flush_interval -1 removed for consistency)
 		}
 		header Cache-Control "public, max-age=31536000, immutable"
@@ -155,6 +179,8 @@
 				keepalive_idle_conns 32
 				max_conns_per_host 100
 			}
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto https
 			header_up X-Real-IP {client_ip}
 		}
 		header Cache-Control "public, max-age=3600, stale-while-revalidate=300"
@@ -169,6 +195,8 @@
 				keepalive_idle_conns 32
 				max_conns_per_host 100
 			}
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto https
 			# Enable streaming for all SSR responses (removed flush_interval -1)
 			# Real visitor IP for SvelteKit's getClientAddress() (adapter-node
 			# reads it via ADDRESS_HEADER=x-real-ip). SSR forwards it to the
@@ -183,6 +211,11 @@
 		# a manual reload. `no-cache` = store but always revalidate.
 		header ?Cache-Control "private, no-cache"
 	}
+}
+
+{$FRONTEND_DOMAIN} {
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+	import revel_frontend
 }
 
 # -------------------------------------------------------
@@ -214,31 +247,41 @@
 	# Protected media files - require signed URL validation
 	# Single rule covers ALL protected files (protected/file/*, protected/questionnaire_files/*, etc.)
 	handle_path /media/protected/* {
-		# CORS headers for cross-origin fetch (frontend downloads PDFs via fetch API)
-		header Access-Control-Allow-Origin "https://{$FRONTEND_DOMAIN}"
-		header Access-Control-Allow-Credentials "true"
-		header Access-Control-Allow-Methods "GET, OPTIONS"
-		header Access-Control-Allow-Headers "Authorization, Content-Type"
+		# `route` keeps literal order: the CORS header must run AFTER forward_auth
+		# has copied Django's answer into the request.
+		route {
+			# Validate signature with Django. Django also decides CORS: the
+			# forwarded request keeps the browser's Origin, so django-cors-headers
+			# answers with Access-Control-Allow-Origin only for an allowed origin
+			# (CORS_ALLOWED_ORIGINS, or an ACTIVE organization custom domain via
+			# dynamic CORS). copy_headers lifts it into a request header (and strips
+			# any client-sent copy) and we echo it. Replaces the origin that was
+			# pinned to FRONTEND_DOMAIN, which broke media on custom domains (infra#67).
+			# forward_auth sends preflights as GET too, so OPTIONS is covered.
+			# Note: handle_path strips /media/protected from {uri}, so we add /protected back
+			forward_auth web:8000 {
+				uri /api/media/validate/protected{uri}
+				copy_headers Access-Control-Allow-Origin>X-Revel-Cors-Origin
+			}
+			@cors_allowed header X-Revel-Cors-Origin *
+			header @cors_allowed Access-Control-Allow-Origin "{http.request.header.X-Revel-Cors-Origin}"
+			header +Vary Origin
+			header Access-Control-Allow-Credentials "true"
+			header Access-Control-Allow-Methods "GET, OPTIONS"
+			header Access-Control-Allow-Headers "Authorization, Content-Type"
 
-		# Handle CORS preflight
-		@options method OPTIONS
-		handle @options {
-			respond 204
+			# Handle CORS preflight
+			@options method OPTIONS
+			respond @options 204
+
+			# Private caching (browser only, not CDN)
+			header Cache-Control "private, max-age=3600"
+
+			# Serve from media directory
+			# Note: handle_path strips /media/protected, so root must include /protected
+			root * /srv/revel_media/protected
+			file_server
 		}
-
-		# Validate signature with Django
-		# Note: handle_path strips /media/protected from {uri}, so we add /protected back
-		forward_auth web:8000 {
-			uri /api/media/validate/protected{uri}
-		}
-
-		# Serve from media directory
-		# Note: handle_path strips /media/protected, so root must include /protected
-		root * /srv/revel_media/protected
-		file_server
-
-		# Private caching (browser only, not CDN)
-		header Cache-Control "private, max-age=3600"
 	}
 
 	# Public media files - served directly without validation
@@ -294,4 +337,66 @@
 	header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 	reverse_proxy revel_grafana:3000
 	encode gzip
+}
+
+# -------------------------------------------------------
+# Organization custom domains (white-label, infra#67)
+# -------------------------------------------------------
+
+# Fallback origin: organizations CNAME their domain to this name (the backend's
+# CUSTOM_DOMAIN_CNAME_TARGET, read from .env here too) and it is
+# registered as the zone's Cloudflare for SaaS fallback origin. Set it up like
+# every other host: DNS-only (grey) until Caddy has its certificate, then
+# proxied (orange).
+# Requests to the name itself go to the platform; customer traffic arrives with
+# the CUSTOMER's Host and lands in the catch-all below. Unset, it resolves to an
+# internal .localhost name (no public ACME attempt), like Grafana's default.
+{$CUSTOM_DOMAIN_CNAME_TARGET:customers.localhost} {
+	redir https://{$FRONTEND_DOMAIN}{uri}
+}
+
+# Catch-all for organization custom domains. Caddy matches named sites first,
+# so this only sees hostnames no block above claims. Cloudflare for SaaS connects with
+# SNI = Host = the customer hostname and, under Full (strict), needs a publicly
+# trusted certificate for that name: on-demand TLS gets one from Let's Encrypt,
+# gated by the ask endpoint below. TLS-ALPN cannot pass through Cloudflare's
+# proxy, so only HTTP-01 is used (Cloudflare forwards port 80).
+https:// {
+	tls {
+		on_demand
+		issuer acme {
+			disable_tlsalpn_challenge
+		}
+	}
+
+	# Not our domains: no includeSubDomains, no preload.
+	header Strict-Transport-Security "max-age=31536000"
+	import revel_frontend
+}
+
+# The on_demand_tls "ask" endpoint (global options). Caddy calls
+# GET /revel-custom-domain-ask?domain=<host>; we turn it into the API's public
+# by-domain lookup, which answers 200 only for an ACTIVE custom domain whose
+# organization has custom_domain_enabled, 404 otherwise. Loopback only. The
+# regexp refuses anything that is not a plain lowercase hostname before it
+# reaches Django.
+# ponytail: by-domain is anonymous-throttled (all asks share one IP); a
+# dedicated ask endpoint (revel-backend#1178) is the upgrade path.
+http://127.0.0.1:9180 {
+	bind 127.0.0.1
+
+	@custom_domain_ask {
+		path /revel-custom-domain-ask
+		vars_regexp {query.domain} ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$
+	}
+	handle @custom_domain_ask {
+		rewrite * /api/organizations/by-domain/{query.domain}
+		reverse_proxy web:8000 {
+			header_up Host {$API_DOMAIN}
+			header_up X-Forwarded-Proto https
+		}
+	}
+	handle {
+		respond 404
+	}
 }
