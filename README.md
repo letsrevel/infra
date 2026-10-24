@@ -92,6 +92,19 @@ Domains come from `.env` (`FRONTEND_DOMAIN`, `API_DOMAIN` and `GRAFANA_DOMAIN`, 
 curl -w "\nTTFB: %{time_starttransfer}s\nTotal: %{time_total}s\n" -o /dev/null "https://<your-frontend-domain>/events"
 ```
 
+### Organization custom domains
+
+All three Caddyfiles can serve organizations on their own hostnames ([#67](https://github.com/letsrevel/infra/issues/67); the backend side is the [white-label operator guide](https://github.com/letsrevel/revel-backend/blob/main/docs/guides/white-label/operators.md)). The pieces:
+
+- `CUSTOM_DOMAIN_CNAME_TARGET` (for example `customers.letsrevel.io`) is the name organizers CNAME to. Caddy serves it (a redirect to the frontend) so it has its own certificate; behind Cloudflare it is also the Cloudflare for SaaS fallback origin, set up grey first, orange once Caddy has its certificate. Unset, the block resolves to an inert `.localhost` name.
+- An `https://` catch-all at the end of each file serves the frontend for any other hostname, with **on-demand TLS**: Caddy gets a Let's Encrypt certificate for a customer hostname only after the backend's `ask` endpoint (`GET /api/tls/ask?domain=<host>`, called straight over the docker network, unthrottled) answers 200 (an ACTIVE domain of an organization with `custom_domain_enabled`). The backend must be deployed with that endpoint before Caddy is reloaded, or every ask is refused. Behind Cloudflare this is what satisfies Full (strict): Cloudflare connects with the customer hostname as SNI and Host. Only HTTP-01 is used there, since TLS-ALPN cannot cross Cloudflare's proxy.
+- Every frontend proxy overwrites `X-Forwarded-Host` and `X-Forwarded-Proto`, and the frontend runs with `HOST_HEADER` / `PROTOCOL_HEADER` and `PLATFORM_HOSTS` instead of `ORIGIN`. Keep `ORIGIN` out of `.env`.
+- The catch-all sends HSTS without `includeSubDomains` or `preload`: those domains are not ours.
+- Protected media echoes `Access-Control-Allow-Origin` from Django's CORS decision, so it works on the platform and on active custom domains alike. `CORS_ALLOWED_ORIGINS` must list the frontend origin (the wizard sets it).
+- Changing `CUSTOM_DOMAIN_CNAME_TARGET` needs `docker compose up -d caddy` (a recreate): Caddy reads `.env` at container start, not on `caddy reload`.
+
+The Cloudflare token and zone id, the URL template and the Turnstile hostname list are described in `.env.example`.
+
 ### Data directory ownership
 
 The backend containers (`web`, `celery_default`, `beat`, `telegram`) run as a non-root user, `appuser` (uid/gid 997). They write to bind-mounted directories from the checkout: `media/` (uploads, logos, generated PDFs and wallet passes; all four), plus `geo-data/` (the periodic IP2Location refresh) and `sentinel/` (the LLM sentinel model) for `web` and `celery_default` only. A fresh clone belongs to whoever cloned it, so without a chown those writes fail with `PermissionError: [Errno 13]`. `setup.sh` reads the uid/gid from the image and runs the chown for you (with `sudo` when not root). On an install that did not go through the wizard:

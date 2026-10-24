@@ -206,12 +206,24 @@ services:
       # internal network, forwarding the visitor IP via X-Real-IP (handleFetch
       # in the frontend). Unset to fall back to the public API URL. backend#487
       - INTERNAL_API_URL=http://web:8000
-      # Public API origin the browser calls, and the frontend's own public
-      # origin. Read at RUNTIME by the frontend (revel-frontend#396), so the
-      # prebuilt image retargets without a rebuild. Wired from the API/frontend
-      # base URLs already defined in .env.
+      # Public API origin the browser calls. Read at RUNTIME by the frontend
+      # (revel-frontend#396), so the prebuilt image retargets without a
+      # rebuild. Wired from the API base URL already defined in .env.
       - PUBLIC_API_URL=${BASE_URL}
-      - ORIGIN=${FRONTEND_BASE_URL}
+      # Tenant mode (organization custom domains, infra#67). NO ORIGIN: it
+      # would win over the two headers and pin every host to the platform,
+      # breaking CSRF / form actions on custom domains. adapter-node derives
+      # the origin per request from the headers Caddy sets (X-Forwarded-Host /
+      # X-Forwarded-Proto, overwritten in the Caddyfile on every frontend proxy).
+      - HOST_HEADER=x-forwarded-host
+      - PROTOCOL_HEADER=x-forwarded-proto
+      # Platform hostnames only (never the API host). Any other Host is looked
+      # up as an organization's custom domain; localhost always counts as
+      # platform, so the healthcheck keeps working.
+      - PLATFORM_HOSTS=${FRONTEND_DOMAIN:-letsrevel.io}
+      - PLATFORM_ORIGIN=${FRONTEND_BASE_URL}
+      # MUST equal the backend's CUSTOM_DOMAIN_URL_TEMPLATE (same .env value).
+      - PUBLIC_CUSTOM_DOMAIN_URL_TEMPLATE=${CUSTOM_DOMAIN_URL_TEMPLATE:-https://{hostname}}
     networks:
       - revel_network
     healthcheck:
