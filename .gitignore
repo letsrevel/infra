@@ -12,6 +12,9 @@ geo-data/*
 sentinel/*
 !sentinel/.gitkeep
 
+public/*
+!public/.gitkeep
+
 certs/*
 !certs/.gitkeep
 

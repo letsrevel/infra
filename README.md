@@ -80,7 +80,9 @@ Any SMTP provider works; letsrevel.io uses the Brevo SMTP relay (`smtp-relay.bre
 
 ### Caddyfiles
 
-Domains come from `.env` (`FRONTEND_DOMAIN`, `API_DOMAIN` and `GRAFANA_DOMAIN`, plus `DOCS_DOMAIN` in the production `Caddyfile` only). Pick a variant with `CADDYFILE_PATH`; the wizard sets it.
+Domains come from `.env` (`FRONTEND_DOMAIN`, `API_DOMAIN` and `GRAFANA_DOMAIN`, plus `DOCS_DOMAIN` and `PUBLIC_DOMAIN` in the production `Caddyfile` only). Pick a variant with `CADDYFILE_PATH`; the wizard sets it.
+
+`PUBLIC_DOMAIN` (default `public.letsrevel.io`) serves the `public/` directory read-only, with a directory listing. Copy a file into `public/` on the server and it is live at `https://<PUBLIC_DOMAIN>/<file>` without a reload. Everything in there is world-readable and listed, so put nothing private in it. The directory is gitignored apart from its `.gitkeep`.
 
 - `Caddyfile`: Cloudflare-aware plus legacy redirects. The production default; its fallbacks resolve to the letsrevel.io domains.
 - `Caddyfile.cloudflare`: self-hosting behind Cloudflare's proxy.

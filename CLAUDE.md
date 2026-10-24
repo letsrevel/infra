@@ -99,6 +99,7 @@ Configured in `Caddyfile`:
 - `beta-api.letsrevel.io` - API (port 8000), media files served from `/srv/revel_media`
 - `flower.letsrevel.io` - Celery monitoring (port 5555)
 - `grafana.letsrevel.io` - Grafana (port 3000)
+- `public.letsrevel.io` - Static public file drop, served (with directory listing) from `./public`
 
 **Important:** The `/metrics` endpoint is blocked on the API domain for security.
 

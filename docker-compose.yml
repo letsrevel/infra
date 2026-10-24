@@ -25,6 +25,8 @@ services:
       - caddy_config:/config
       - ./media:/srv/revel_media
       - ./docs/site:/srv/docs:ro
+      # Public file drop served at PUBLIC_DOMAIN (production Caddyfile only).
+      - ./public:/srv/public:ro
       # Hosted geo datasets (worldcities.csv, IP2LOCATION-LITE-DB5.BIN, NOTICE)
       # served at /geo-data/* so self-hosters can fetch them at setup time.
       - ./geo-data:/srv/geo-data:ro

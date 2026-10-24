@@ -360,6 +360,17 @@ www.letsrevel.io {
 	}
 }
 
+# Public file drop (vademecums, brand assets, anything linked from events),
+# mirroring public.biagiodistefano.io. Whatever sits in ./public on the server
+# is world-readable and listed by `browse`, so only put files there that are
+# meant to be public. Production only, like DOCS_DOMAIN.
+{$PUBLIC_DOMAIN:public.letsrevel.io} {
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+	encode zstd gzip
+	root * /srv/public
+	file_server browse
+}
+
 # -------------------------------------------------------
 # Revel Grafana
 # -------------------------------------------------------
