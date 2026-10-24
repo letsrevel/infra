@@ -55,9 +55,11 @@
 }
 
 # -------------------------------------------------------
-# Redirect beta and www to root
+# Redirect www to root
 # -------------------------------------------------------
-beta.letsrevel.io, www.letsrevel.io {
+# (beta.letsrevel.io / beta-api.letsrevel.io moved to the beta server: their
+# DNS no longer points here, so prod could never renew certificates for them.)
+www.letsrevel.io {
 	redir https://letsrevel.io{uri} permanent
 }
 
@@ -222,13 +224,6 @@ beta.letsrevel.io, www.letsrevel.io {
 {$FRONTEND_DOMAIN:letsrevel.io} {
 	header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 	import revel_frontend
-}
-
-# -------------------------------------------------------
-# Redirect beta-api to api
-# -------------------------------------------------------
-beta-api.letsrevel.io {
-	redir https://api.letsrevel.io{uri} permanent
 }
 
 # -------------------------------------------------------
