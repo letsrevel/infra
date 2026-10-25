@@ -714,7 +714,7 @@ services:
           cpus: '1.0'
 
   grafana:
-    image: grafana/grafana:11.1.0
+    image: grafana/grafana:13.2.4
     profiles: ["observability"]
     container_name: revel_grafana
     restart: always
