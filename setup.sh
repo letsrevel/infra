@@ -183,7 +183,8 @@ fi
 
 if [ -f "$ENV_FILE" ]; then
 	backup="${ENV_FILE}.bak.$(date +%Y%m%d_%H%M%S)"
-	cp "$ENV_FILE" "$backup"
+	# umask 077: the copy is created owner-only, never briefly readable.
+	(umask 077 && cp "$ENV_FILE" "$backup")
 	chmod 600 "$backup"
 	say "Backed up existing $ENV_FILE -> $backup"
 fi
