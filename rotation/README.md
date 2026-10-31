@@ -51,7 +51,7 @@ old container saving a row that a new one wrote under the new key would corrupt 
 `stage` therefore rolls twice:
 
 1. **Introduce**: the new key is appended to `*_FALLBACKS`, the old key stays primary (for
-   `SECRET_KEY` the unsubscribe pin is set here, too). Roll, verify. Every container can now read the new key; nothing is written with it.
+   `SECRET_KEY` the unsubscribe pin is introduced here, too). Roll, verify. Every container can now read the new key; nothing is written with it.
 2. **Promote**: the new key becomes primary and the old key goes FIRST in `*_FALLBACKS`, the rest of the list kept. Roll, verify.
 
 Both phases are recorded in `state.json` (`phase`, shown in `status`). If a run stops after phase 1,
@@ -97,10 +97,14 @@ Each probe prints PASS/FAIL, never a value:
 | `STRIPE_WEBHOOK_SECRETS` | 24 hours | Stripe lets the rolled secret live up to 24h. Set that expiry in the dashboard. |
 | everything else | none | Providers handle the overlap (expiry on the old key); `finalize` is only housekeeping. |
 
-`UNSUBSCRIBE_SIGNING_KEYS`: before staging `SECRET_KEY`, if the list is empty the tool sets it to
-`<new random>,<current SECRET_KEY>` so links already in mailboxes keep verifying after the
-`SECRET_KEY` fallback is finalized away. Old unsubscribe keys are never dropped automatically (the
-list is long-lived by design); a rollback keeps the pin too.
+`UNSUBSCRIBE_SIGNING_KEYS` follows the same introduce/promote pattern. If it is empty when
+`SECRET_KEY` phase 1 runs, the tool pins `<current SECRET_KEY>,<new random>`: the old key stays
+first, so containers still sign with it and old containers still verify, while every container
+learns the new one. In phase 2 it is reordered to `<new random>,<old SECRET_KEY>` (further entries
+kept in order), so links already in mailboxes keep verifying after the `SECRET_KEY` fallback is
+finalized away. A list that was not created by this run is never touched, and old unsubscribe keys
+are never dropped automatically (the list is long-lived by design). Rolling back phase 1 removes a
+pin created in that run; after phase 2 the pin is kept as it is.
 
 ## First-run order
 

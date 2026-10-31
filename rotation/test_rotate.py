@@ -428,9 +428,12 @@ class TwoPhaseTests(Base):
     def test_unsubscribe_pin_is_in_place_before_promotion(self) -> None:
         snaps: list[str] = []
         self.make(on_roll=lambda _l: snaps.append((self.tmp / ".env").read_text())).stage(["SECRET_KEY"])
-        pin = r.get_env(snaps[0], "UNSUBSCRIBE_SIGNING_KEYS")
-        self.assertTrue(pin.endswith(",oldsecretkey"))
+        pin1 = r.csv_split(r.get_env(snaps[0], "UNSUBSCRIBE_SIGNING_KEYS"))
+        self.assertEqual(pin1[0], "oldsecretkey")  # phase 1: old key still first, so still signs with it
+        self.assertEqual(len(pin1), 2)
         self.assertEqual(r.get_env(snaps[0], "SECRET_KEY"), "oldsecretkey")
+        pin2 = r.csv_split(r.get_env(snaps[1], "UNSUBSCRIBE_SIGNING_KEYS"))
+        self.assertEqual(pin2, [pin1[1], "oldsecretkey"])  # phase 2: promoted, new first
 
     def test_phase1_verify_failure_restores_old_config(self) -> None:
         rot = self.make(fail=lambda line: line.endswith("manage.py check"))
@@ -478,6 +481,24 @@ class TwoPhaseTests(Base):
         self.assertEqual(rot.stage(["SALT_KEY"]), 0)  # resumes: promotes, does not generate another key
         self.assertEqual(self.env("SALT_KEY"), introduced)
         self.assertEqual(self.env("SALT_KEY_FALLBACKS"), "oldsalt+/=")
+
+    def test_preexisting_pin_is_never_touched(self) -> None:
+        (self.tmp / ".env").write_text(ENV.replace("UNSUBSCRIBE_SIGNING_KEYS=", "UNSUBSCRIBE_SIGNING_KEYS=k1,oldsecretkey,k0"))
+        snaps: list[str] = []
+        self.make(on_roll=lambda _l: snaps.append((self.tmp / ".env").read_text())).stage(["SECRET_KEY"])
+        self.assertEqual([r.get_env(x, "UNSUBSCRIBE_SIGNING_KEYS") for x in snaps], ["k1,oldsecretkey,k0"] * 2)
+
+    def test_rollback_after_phase1_removes_the_pin_created_in_this_run(self) -> None:
+        rot = self.make(on_roll=lambda _l: (_ for _ in ()).throw(KeyboardInterrupt()))
+        with self.assertRaises(KeyboardInterrupt):
+            rot.stage(["SECRET_KEY"])
+        self.assertTrue(self.env("UNSUBSCRIBE_SIGNING_KEYS"))
+        self.make().rollback("SECRET_KEY")
+        self.assertEqual(self.env("UNSUBSCRIBE_SIGNING_KEYS"), "")
+
+    def test_rollback_of_a_failed_phase1_removes_the_pin(self) -> None:
+        self.make(fail=lambda line: line.endswith("manage.py check")).stage(["SECRET_KEY"])
+        self.assertEqual(self.env("UNSUBSCRIBE_SIGNING_KEYS"), "")
 
     def test_migrate_needs_phase_two(self) -> None:
         rot = self.make(on_roll=lambda _l: (_ for _ in ()).throw(KeyboardInterrupt()))

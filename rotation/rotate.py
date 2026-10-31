@@ -545,13 +545,18 @@ class Rotator:
                 raise RotationError(f"current {name} contains a comma and cannot be kept in the {fb} list")
             existing = csv_split(get_env(env, fb))
             edits = {fb: ",".join(existing + [generate_secret()])}
+            touched, pin = [fb], False
             if name == "SECRET_KEY" and not csv_split(get_env(env, "UNSUBSCRIBE_SIGNING_KEYS")):
-                # Pin: links already in mailboxes keep verifying once SECRET_KEY's fallback is finalized away.
-                # Not in `touched`: a rollback keeps it (harmless and long-lived).
-                edits["UNSUBSCRIBE_SIGNING_KEYS"] = f"{generate_secret()},{old}"
+                # Pin, introduced like the keys: the old key stays FIRST (containers keep signing with it,
+                # so old containers still verify) and every container learns the new one. Phase 2 promotes it.
+                # Links in mailboxes keep verifying once SECRET_KEY's fallback is finalized away.
+                edits["UNSUBSCRIBE_SIGNING_KEYS"] = f"{old},{generate_secret()}"
+                touched.append("UNSUBSCRIBE_SIGNING_KEYS")
+                pin = True
             self.out(f"[{name}] phase 1/2: introduce the new key as a fallback")
-            self._commit([(s, Staged(edits, [fb], list(s.services),
-                                     {"phase": 1, "new_index": len(existing), "ever_primary": False}))], True)
+            self._commit([(s, Staged(edits, touched, list(s.services),
+                                     {"phase": 1, "new_index": len(existing), "ever_primary": False,
+                                      "pin_created": pin}))], True)
             entry = self.load_state()["secrets"][name]
         env = self.env_text()
         fallbacks, old = csv_split(get_env(env, fb)), get_env(env, name) or ""
@@ -559,6 +564,9 @@ class Rotator:
             raise RotationError(f"{fb} no longer holds the introduced key; fix by hand")
         new = fallbacks[entry["new_index"]]
         edits = {name: new, fb: ",".join([old] + [x for x in fallbacks if x not in (old, new)])}
+        pin = csv_split(get_env(env, "UNSUBSCRIBE_SIGNING_KEYS"))
+        if entry.get("pin_created") and len(pin) >= 2 and pin[0] == old:
+            edits["UNSUBSCRIBE_SIGNING_KEYS"] = ",".join([pin[1], pin[0], *pin[2:]])  # only our own pin
         self.out(f"[{name}] phase 2/2: promote the new key")
         self._commit([(s, Staged(edits, [name, fb], list(s.services), {"phase": 2, "ever_primary": True}))],
                      True, resume=True)
