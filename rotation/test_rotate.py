@@ -45,14 +45,19 @@ API_DOMAIN=api.example.test
 class FakeRunner:
     """Records every call; ``fail`` is a predicate on the argv string that makes a call exit 1."""
 
-    def __init__(self, base: Path, fail=None) -> None:
-        self.base, self.fail, self.calls = base, fail, []
+    def __init__(self, base: Path, fail=None, fail_call=None, on_roll=None, logs="") -> None:
+        self.base, self.fail, self.fail_call, self.on_roll, self.logs, self.calls = base, fail, fail_call, on_roll, logs, []
 
-    def run(self, argv, *, input_text=None, stdout_path=None):
-        self.calls.append(SimpleNamespace(argv=list(argv), input=input_text, stdout_path=stdout_path))
+    def run(self, argv, *, input_text=None, stdout_path=None, stream=False):
+        call = SimpleNamespace(argv=list(argv), input=input_text, stdout_path=stdout_path, stream=stream)
+        self.calls.append(call)
         line = " ".join(argv)
-        if self.fail and self.fail(line):
+        if "deploy-rollout.sh" in line and self.on_roll:
+            self.on_roll(line)
+        if (self.fail and self.fail(line)) or (self.fail_call and self.fail_call(call)):
             return SimpleNamespace(returncode=1, stdout="", stderr="")
+        if argv[:3] == ["docker", "compose", "logs"]:
+            return SimpleNamespace(returncode=0, stdout=self.logs, stderr="")
         if line == "docker compose config --services":
             return SimpleNamespace(returncode=0, stdout="\n".join(SERVICES), stderr="")
         if argv[:4] == ["docker", "compose", "ps", "--format"]:
@@ -81,8 +86,8 @@ class Base(unittest.TestCase):
         self.out: list[str] = []
         self.secrets_in: list[str] = []
 
-    def make(self, fail=None, prompts=(), files=(), maintenance=False) -> r.Rotator:
-        self.runner = FakeRunner(self.tmp, fail)
+    def make(self, fail=None, prompts=(), files=(), maintenance=False, **kw) -> r.Rotator:
+        self.runner = FakeRunner(self.tmp, fail, **kw)
         sec, plain = iter(prompts), iter(files)
 
         def prompt_secret(_msg):
@@ -170,14 +175,10 @@ class ListOpsTests(Base):
         self.assertEqual(rot.stage(["SALT_KEY"]), 1)
         self.assertEqual(self.env("SALT_KEY"), "a,b")
 
-    def test_second_stage_prepends_to_existing_fallbacks(self) -> None:
-        rot = self.make()
-        rot.stage(["SALT_KEY"])
-        first = self.env("SALT_KEY")
-        rot.rollback("SALT_KEY")  # back to idle, then stage again
-        rot.stage(["SALT_KEY"])
-        self.assertEqual(self.env("SALT_KEY_FALLBACKS"), "oldsalt+/=")
-        self.assertNotEqual(self.env("SALT_KEY"), first)
+    def test_promotion_puts_old_key_first_and_keeps_the_rest(self) -> None:
+        (self.tmp / ".env").write_text(ENV.replace("SALT_KEY_FALLBACKS=", "SALT_KEY_FALLBACKS=older1,older2"))
+        self.make().stage(["SALT_KEY"])
+        self.assertEqual(self.env("SALT_KEY_FALLBACKS"), "oldsalt+/=,older1,older2")
 
 
 class UnsubscribePinTests(Base):
@@ -199,9 +200,10 @@ class UnsubscribePinTests(Base):
         rot = self.make()
         rot.stage(["SECRET_KEY"])
         pin = self.env("UNSUBSCRIBE_SIGNING_KEYS")
+        new = self.env("SECRET_KEY")
         rot.rollback("SECRET_KEY")
         self.assertEqual(self.env("SECRET_KEY"), "oldsecretkey")
-        self.assertEqual(self.env("SECRET_KEY_FALLBACKS"), "")
+        self.assertEqual(self.env("SECRET_KEY_FALLBACKS"), new)  # a key that was primary is never removed
         self.assertEqual(self.env("UNSUBSCRIBE_SIGNING_KEYS"), pin)
 
     def test_pin_is_never_dropped_by_finalize(self) -> None:
@@ -296,7 +298,10 @@ class StateMachineTests(Base):
         rot.migrate()
         with mock.patch.object(r.shutil, "which", return_value="/usr/bin/age"):
             self.assertEqual(rot.finalize(["SALT_KEY"]), 0)
-        call = [c for c in self.runner.calls if c.argv[0] == "age"][0]
+        calls = [c for c in self.runner.calls if c.argv[0] == "age"]
+        self.assertEqual(calls[0].input, "x")  # trial encryption first, to /dev/null
+        self.assertEqual(str(calls[0].stdout_path), os.devnull)
+        call = calls[1]
         self.assertEqual(call.argv, ["age", "-r", "age1abc"])
         self.assertIn("SALT_KEY=oldsalt+/=", call.input)
         self.assertTrue(str(call.stdout_path).endswith(".age"))
@@ -344,8 +349,9 @@ class StateMachineTests(Base):
         exp = next(i for i, x in enumerate(lines) if "--force-recreate postgres-exporter" in x)
         roll = next(i for i, x in enumerate(lines) if x.endswith("deploy-rollout.sh roll web celery_default beat telegram"))
         self.assertTrue(alter < pgb < exp < roll)
-        self.assertIn("ALTER ROLE \"revel\" PASSWORD", self.runner.calls[alter].input)
-        self.assertIn(self.env("DB_PASSWORD"), self.runner.calls[alter].input)
+        sql = self.runner.calls[alter].input
+        self.assertIn("ALTER ROLE \"revel\" PASSWORD 'SCRAM-SHA-256$4096:", sql)
+        self.assertNotIn(self.env("DB_PASSWORD"), sql)  # only the verifier leaves the host
 
     def test_grafana_resets_via_stdin_and_does_not_roll(self) -> None:
         rot = self.make()
@@ -404,6 +410,264 @@ class CheckDriftTests(Base):
         self.assertEqual(r.check_drift([example.read_text()], None)[0], [])
 
 
+class TwoPhaseTests(Base):
+    def test_introduce_then_promote_with_a_rollout_between(self) -> None:
+        snaps: list[str] = []
+        rot = self.make(on_roll=lambda _l: snaps.append((self.tmp / ".env").read_text()))
+        rot.stage(["SALT_KEY"])
+        self.assertEqual(len(snaps), 2)
+        new = self.env("SALT_KEY")
+        # phase 1: old stays primary, the new key is already a fallback
+        self.assertEqual(r.get_env(snaps[0], "SALT_KEY"), "oldsalt+/=")
+        self.assertEqual(r.get_env(snaps[0], "SALT_KEY_FALLBACKS"), new)
+        # phase 2: new is primary, old is first in the fallbacks
+        self.assertEqual(r.get_env(snaps[1], "SALT_KEY"), new)
+        self.assertEqual(r.get_env(snaps[1], "SALT_KEY_FALLBACKS"), "oldsalt+/=")
+        self.assertEqual(rot.load_state()["secrets"]["SALT_KEY"]["phase"], 2)
+
+    def test_unsubscribe_pin_is_in_place_before_promotion(self) -> None:
+        snaps: list[str] = []
+        self.make(on_roll=lambda _l: snaps.append((self.tmp / ".env").read_text())).stage(["SECRET_KEY"])
+        pin = r.get_env(snaps[0], "UNSUBSCRIBE_SIGNING_KEYS")
+        self.assertTrue(pin.endswith(",oldsecretkey"))
+        self.assertEqual(r.get_env(snaps[0], "SECRET_KEY"), "oldsecretkey")
+
+    def test_phase1_verify_failure_restores_old_config(self) -> None:
+        rot = self.make(fail=lambda line: line.endswith("manage.py check"))
+        self.assertEqual(rot.stage(["SALT_KEY"]), 1)
+        self.assertEqual(self.env("SALT_KEY"), "oldsalt+/=")
+        self.assertEqual(self.env("SALT_KEY_FALLBACKS"), "")
+        self.assertEqual(rot.step_of("SALT_KEY"), "idle")
+
+    def test_phase2_verify_failure_keeps_the_new_key_as_fallback(self) -> None:
+        checks = []
+        rot = self.make(fail=lambda line: line.endswith("manage.py check") and (checks.append(1) or len(checks) == 2))
+        self.assertEqual(rot.stage(["SALT_KEY"]), 1)
+        self.assertEqual(self.env("SALT_KEY"), "oldsalt+/=")
+        new = self.env("SALT_KEY_FALLBACKS")
+        self.assertTrue(new and new != "oldsalt+/=")
+        entry = rot.load_state()["secrets"]["SALT_KEY"]
+        self.assertEqual((entry["step"], entry["phase"], entry["ever_primary"]), ("staged", 1, True))
+        self.assertTrue(list(self.tmp.glob(".env.bak.*")))  # the backup holding the new key stays
+        self.assertNotIn(new, json.dumps(entry))
+
+    def test_rollback_after_phase1_is_clean_but_never_after_the_key_was_primary(self) -> None:
+        rot = self.make(on_roll=lambda _l: (_ for _ in ()).throw(KeyboardInterrupt()))
+        with self.assertRaises(KeyboardInterrupt):  # crash right after phase 1 was written
+            rot.stage(["SALT_KEY"])
+        rot = self.make()
+        rot.rollback("SALT_KEY")
+        self.assertEqual(self.env("SALT_KEY_FALLBACKS"), "")
+        self.assertEqual(rot.step_of("SALT_KEY"), "idle")
+        rot.stage(["SALT_KEY"])
+        rot.rollback("SALT_KEY")  # phase 2 -> back to phase 1, key kept
+        kept = self.env("SALT_KEY_FALLBACKS")
+        self.assertTrue(kept)
+        with self.assertRaises(r.RotationError):  # it has been primary: cannot be removed
+            rot.rollback("SALT_KEY")
+        self.assertEqual(self.env("SALT_KEY_FALLBACKS"), kept)
+
+    def test_crash_between_phases_resumes_with_the_same_key(self) -> None:
+        calls = []
+        rot = self.make(on_roll=lambda _l: (calls.append(1), len(calls) == 1 and (_ for _ in ()).throw(KeyboardInterrupt())))
+        with self.assertRaises(KeyboardInterrupt):
+            rot.stage(["SALT_KEY"])
+        introduced = self.env("SALT_KEY_FALLBACKS")
+        self.assertEqual(self.env("SALT_KEY"), "oldsalt+/=")
+        rot = self.make()
+        self.assertEqual(rot.stage(["SALT_KEY"]), 0)  # resumes: promotes, does not generate another key
+        self.assertEqual(self.env("SALT_KEY"), introduced)
+        self.assertEqual(self.env("SALT_KEY_FALLBACKS"), "oldsalt+/=")
+
+    def test_migrate_needs_phase_two(self) -> None:
+        rot = self.make(on_roll=lambda _l: (_ for _ in ()).throw(KeyboardInterrupt()))
+        with self.assertRaises(KeyboardInterrupt):
+            rot.stage(["SALT_KEY"])
+        with self.assertRaises(r.RotationError):
+            self.make().migrate()
+
+
+class FinalizeSafetyTests(Base):
+    def setUp(self) -> None:
+        super().setUp()
+        (self.tmp / ".env").write_text(ENV + "ROTATION_AGE_RECIPIENT=age1abc\n")
+        self.failing = False
+        self.which = mock.patch.object(r.shutil, "which", return_value="/usr/bin/age")
+        self.which.start()
+        self.addCleanup(self.which.stop)
+
+    def staged(self, **kw) -> r.Rotator:
+        rot = self.make(**kw)
+        rot.stage(["SALT_KEY"])
+        rot.migrate()
+        return rot
+
+    def test_archive_failure_changes_nothing(self) -> None:
+        rot = self.staged(fail_call=lambda c: c.argv[0] == "age" and (c.input or "").startswith("# retired"))
+        before, baks = (self.tmp / ".env").read_text(), sorted(self.tmp.glob(".env.bak.*"))
+        n_calls = len(self.runner.calls)
+        self.assertEqual(rot.finalize(["SALT_KEY"]), 1)
+        self.assertEqual((self.tmp / ".env").read_text(), before)
+        self.assertEqual(sorted(self.tmp.glob(".env.bak.*")), baks)
+        self.assertEqual(rot.step_of("SALT_KEY"), "migrated")
+        self.assertFalse([c for c in self.runner.calls[n_calls:] if "deploy-rollout.sh" in " ".join(c.argv)])
+
+    def test_bad_recipient_is_caught_by_a_trial_encryption_up_front(self) -> None:
+        rot = self.staged(fail_call=lambda c: c.argv[0] == "age" and c.input == "x")
+        before = (self.tmp / ".env").read_text()
+        with self.assertRaises(r.RotationError):
+            rot.finalize(["SALT_KEY"])
+        self.assertEqual((self.tmp / ".env").read_text(), before)
+
+    def test_verify_failure_restores_and_leaves_no_plaintext_copy(self) -> None:
+        rot = self.staged(fail=lambda line: self.failing and line.endswith("manage.py check"))
+        baks = sorted(self.tmp.glob(".env.bak.*"))
+        self.failing = True
+        self.assertEqual(rot.finalize(["SALT_KEY"]), 1)
+        self.assertEqual(self.env("SALT_KEY_FALLBACKS"), "oldsalt+/=")
+        self.assertEqual(sorted(self.tmp.glob(".env.bak.*")), baks)
+        self.assertEqual(rot.step_of("SALT_KEY"), "migrated")
+
+    def test_failed_restore_roll_says_services_are_out_of_sync(self) -> None:
+        rot = self.staged(fail=lambda line: self.failing and "deploy-rollout.sh" in line)
+        self.failing = True
+        self.assertEqual(rot.finalize(["SALT_KEY"]), 1)
+        text = "\n".join(self.out)
+        self.assertIn("out of sync", text)
+        self.assertIn("deploy-rollout.sh roll web celery_default beat telegram", text)
+        self.assertEqual(self.env("SALT_KEY_FALLBACKS"), "oldsalt+/=")
+
+    def test_oidc_retired_pem_deleted_after_archive(self) -> None:
+        rot = self.make()
+        rot.stage(["OIDC_SIGNING_KEY_PATH"])
+        self.advance(days=31)
+        self.assertEqual(rot.finalize(["OIDC_SIGNING_KEY_PATH"]), 0)
+        self.assertFalse((self.tmp / "certs" / "oidc.pem").exists())
+
+    def test_oidc_retired_pem_kept_without_archive(self) -> None:
+        rot = self.make()
+        rot.stage(["OIDC_SIGNING_KEY_PATH"])
+        self.advance(days=31)
+        self.assertEqual(rot.finalize(["OIDC_SIGNING_KEY_PATH"], archive=False), 0)
+        self.assertTrue((self.tmp / "certs" / "oidc.pem").exists())  # the only copy
+
+    def test_oidc_deletion_refuses_paths_outside_certs(self) -> None:
+        outside = self.tmp / "outside.pem"
+        outside.write_text("X")
+        (self.tmp / "certs" / "link.pem").symlink_to(outside)
+        rot = self.make()
+        with self.assertRaises(r.RotationError):
+            rot.delete_retired_key("/app/certs/link.pem")
+        with self.assertRaises(r.RotationError):
+            rot.delete_retired_key("/etc/passwd")
+        self.assertTrue(outside.exists())
+        rot.delete_retired_key("/app/certs/oidc.pem")
+        self.assertFalse((self.tmp / "certs" / "oidc.pem").exists())
+
+
+class ErrorBudgetTests(Base):
+    def test_only_structured_error_levels_count(self) -> None:
+        count = lambda t: sum(1 for x in t.splitlines() if r.ERROR_LINE.search(x))  # noqa: E731
+        self.assertEqual(count('{"level": "error", "event": "x"}\n{"level":"critical"}\n{"level": "ERROR"}'), 3)
+        self.assertEqual(count("2026 ERROR django.request boom\nCRITICAL oops"), 2)
+        for line in ('{"level": "info", "event": "task events.cleanup_error_logs done", "path": "/api/error-report"}',
+                     '{"level": "info", "event": "GET /api/errors/list"}',
+                     "INFO celery.app.trace Task payments.handle_error[abc] succeeded",
+                     "debug: error_handler registered"):
+            self.assertEqual(count(line), 0, line)
+
+    def test_info_lines_mentioning_error_do_not_fail_verify(self) -> None:
+        logs = "\n".join('{"level": "info", "event": "task cleanup_error_logs"}' for _ in range(20))
+        rot = self.make(logs=logs)
+        self.assertTrue(rot.verify(["web"], self.clock[0]))
+        rot = self.make(logs="\n".join('{"level": "error"}' for _ in range(6)))
+        self.assertFalse(rot.verify(["web"], self.clock[0]))
+
+
+class StageGuardTests(Base):
+    def test_db_password_is_refused_in_batch_and_with_other_secrets(self) -> None:
+        for names, batch in ((["DB_PASSWORD"], True), (["DB_PASSWORD", "STRIPE_SECRET_KEY"], False)):
+            rot = self.make(maintenance=True, files=[r.DB_CONFIRM_PHRASE])
+            with self.assertRaises(r.RotationError):
+                rot.stage(names, batch=batch)
+            self.assertEqual(self.env("DB_PASSWORD"), "olddbpass")
+            self.assertFalse([c for c in self.runner.calls if "psql" in c.argv])
+
+    def test_bundles_must_be_named_whole(self) -> None:
+        with self.assertRaises(r.RotationError) as cm:
+            r.select(["AWS_ACCESS_KEY_ID"], None)
+        self.assertIn("aws", str(cm.exception))
+        with self.assertRaises(r.RotationError) as cm:
+            r.select(["APPLE_WALLET_CERT_PATH", "APPLE_WALLET_KEY_PATH"], None)
+        self.assertIn("apple_wallet", str(cm.exception))
+        self.assertEqual(len(r.select(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"], None)), 2)
+        self.assertIn("APPLE_WALLET_KEY_PASSWORD", r.select([], "thirdparty"))
+
+    def test_bundle_is_staged_atomically_in_one_roll(self) -> None:
+        (self.tmp / ".env").write_text(ENV + "AWS_ACCESS_KEY_ID=akid_old\nAWS_SECRET_ACCESS_KEY=aws_old\n")
+        rolls = []
+        rot = self.make(prompts=["akid_new", "aws_new"], on_roll=rolls.append)
+        self.assertEqual(rot.stage(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]), 0)
+        self.assertEqual(len(rolls), 1)
+        self.assertEqual((self.env("AWS_ACCESS_KEY_ID"), self.env("AWS_SECRET_ACCESS_KEY")), ("akid_new", "aws_new"))
+
+    def test_bundle_failure_rolls_both_members_back(self) -> None:
+        (self.tmp / ".env").write_text(ENV + "AWS_ACCESS_KEY_ID=akid_old\nAWS_SECRET_ACCESS_KEY=aws_old\n")
+        rot = self.make(prompts=["akid_new", "aws_new"], fail=lambda l: l.endswith("manage.py check"))
+        self.assertEqual(rot.stage(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]), 1)
+        self.assertEqual((self.env("AWS_ACCESS_KEY_ID"), self.env("AWS_SECRET_ACCESS_KEY")), ("akid_old", "aws_old"))
+        self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
+
+    def test_legacy_stripe_secret_seeds_the_old_list(self) -> None:
+        (self.tmp / ".env").write_text("STRIPE_WEBHOOK_SECRETS=\nSTRIPE_WEBHOOK_SECRET=whsec_legacy\n")
+        self.make(prompts=["whsec_new"]).stage(["STRIPE_WEBHOOK_SECRETS"])
+        self.assertEqual(self.env("STRIPE_WEBHOOK_SECRETS"), "whsec_legacy,whsec_new")
+
+
+class RunnerTests(Base):
+    def test_stderr_is_printed_on_failure(self) -> None:
+        logs: list[str] = []
+        res = r.Runner(self.tmp, log=logs.append).run([sys.executable, "-c", "import sys;sys.stderr.write('boom');sys.exit(3)"])
+        self.assertEqual(res.returncode, 3)
+        self.assertIn("boom", "\n".join(logs))
+
+    def test_stream_mode_does_not_capture(self) -> None:
+        res = r.Runner(self.tmp, log=lambda _l: None).run([sys.executable, "-c", "print('hi')"], stream=True)
+        self.assertEqual(res.returncode, 0)
+
+    def test_rollout_output_is_streamed(self) -> None:
+        self.make().roll(["web"])
+        call = [c for c in self.runner.calls if "deploy-rollout.sh" in " ".join(c.argv)][0]
+        self.assertTrue(call.stream)
+
+
+class ScramTests(unittest.TestCase):
+    def test_rfc7677_client_proof_verifies_against_our_stored_key(self) -> None:
+        import base64
+        import hashlib
+        import hmac
+        salt = base64.b64decode("W22ZaJ0SNY7soEsUEjb6gQ==")
+        v = r.scram_verifier("pencil", salt=salt)
+        keys = v.split("$")[2]
+        stored, server = (base64.b64decode(x) for x in keys.split(":"))
+        self.assertTrue(v.startswith("SCRAM-SHA-256$4096:W22ZaJ0SNY7soEsUEjb6gQ==$"))
+        auth = ("n=user,r=rOprNGfwEbeRWgbNEkqO,"
+                "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096,"
+                "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0")
+        sig = hmac.new(stored, auth.encode(), hashlib.sha256).digest()
+        proof = base64.b64decode("dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=")
+        client_key = bytes(a ^ b for a, b in zip(proof, sig))
+        self.assertEqual(hashlib.sha256(client_key).digest(), stored)
+        sig_srv = hmac.new(server, auth.encode(), hashlib.sha256).digest()
+        self.assertEqual(base64.b64encode(sig_srv).decode(), "6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=")
+
+    def test_random_salt_and_no_plaintext(self) -> None:
+        a, b = r.scram_verifier("s3cret-pw"), r.scram_verifier("s3cret-pw")
+        self.assertNotEqual(a, b)
+        self.assertNotIn("s3cret-pw", a)
+        self.assertRegex(a, r"^SCRAM-SHA-256\$4096:[A-Za-z0-9+/=]{24}\$[A-Za-z0-9+/=]{44}:[A-Za-z0-9+/=]{44}$")
+
+
 class NoValueLeakTests(Base):
     def test_values_never_reach_argv_logs_stdout_or_state(self) -> None:
         (self.tmp / ".env").write_text(ENV + "ROTATION_AGE_RECIPIENT=age1abc\n")
@@ -414,8 +678,10 @@ class NoValueLeakTests(Base):
         real = self.runner.run
         self.runner.run = lambda argv, **kw: (logged.append(" ".join(argv)), real(argv, **kw))[1]
         names = ["SECRET_KEY", "SALT_KEY", "OIDC_SIGNING_KEY_PATH", "GRAFANA_ADMIN_PASSWORD", "STRIPE_SECRET_KEY",
-                 "STRIPE_WEBHOOK_SECRETS", "TELEGRAM_BOT_TOKEN", "DB_PASSWORD"]
+                 "STRIPE_WEBHOOK_SECRETS", "TELEGRAM_BOT_TOKEN"]
         self.assertEqual(rot.stage(names), 0)
+        self.assertEqual(rot.stage(["DB_PASSWORD"]), 0)
+        names.append("DB_PASSWORD")
         rot.migrate()
         self.advance(days=31)
         with mock.patch.object(r.shutil, "which", return_value="/usr/bin/age"):
@@ -434,7 +700,7 @@ class NoValueLeakTests(Base):
             self.assertNotIn(v, "\n".join(self.out), f"value leaked into stdout: {v[:4]}...")
             self.assertNotIn(v, state_blob, f"value leaked into state: {v[:4]}...")
         # the secrets did travel, but only via stdin
-        self.assertTrue(any(c.input and self.env("DB_PASSWORD") in c.input for c in self.runner.calls))
+        self.assertFalse(any(c.input and self.env("DB_PASSWORD") in c.input for c in self.runner.calls))
         self.assertTrue(any(c.input and "SECRET_KEY=oldsecretkey" in c.input for c in self.runner.calls))
         self.assertNotIn("olddbpass", env_now)
 

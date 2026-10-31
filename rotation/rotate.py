@@ -11,6 +11,8 @@ from __future__ import annotations
 import argparse
 import base64
 import getpass
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -33,7 +35,8 @@ import manifest as mf  # noqa: E402
 MANIFEST = mf.MANIFEST
 DB_CONFIRM_PHRASE = "ROTATE DB PASSWORD"
 SECRET_LOOKING = re.compile(r"SECRET|TOKEN|KEY|PASSWORD|WEBHOOK_URL")
-ERROR_LINE = re.compile(r'"level"\s*:\s*"(error|critical)"|\b(ERROR|CRITICAL)\b', re.I)
+# Structured (structlog JSON) level, or an uppercase level word in a plain line. Never a bare "error".
+ERROR_LINE = re.compile(r'(?i:"level"\s*:\s*"(?:error|critical)")|\b(?:ERROR|CRITICAL)\b')
 SERVICE_ORDER = ["web", "celery_default", "beat", "telegram", "frontend"]
 
 
@@ -160,23 +163,45 @@ def generate_secret(nbytes: int = 50) -> str:
             return v
 
 
+def scram_verifier(password: str, salt: bytes | None = None, iterations: int = 4096) -> str:
+    """Postgres SCRAM-SHA-256 verifier, computed here so the plaintext password never reaches the server's logs."""
+    if not password.isascii():
+        raise RotationError("non-ASCII passwords are not supported (SASLprep)")
+    salt = salt if salt is not None else secrets.token_bytes(16)
+    salted = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
+    client_key = hmac.new(salted, b"Client Key", hashlib.sha256).digest()
+    stored = hashlib.sha256(client_key).digest()
+    server = hmac.new(salted, b"Server Key", hashlib.sha256).digest()
+    b64 = lambda b: base64.b64encode(b).decode()  # noqa: E731
+    return f"SCRAM-SHA-256${iterations}:{b64(salt)}${b64(stored)}:{b64(server)}"
+
+
 # --------------------------------------------------------------------------- subprocess
 class Runner:
-    """Runs argv lists. Secrets travel via ``input_text`` (stdin) only, never argv."""
+    """Runs argv lists. Secrets travel via ``input_text`` (stdin) only, never argv, so captured
+    stdout/stderr never contain them and stderr is shown when a command fails."""
 
     def __init__(self, cwd: Path, log: Callable[[str], None] = print) -> None:
         self.cwd, self.log = cwd, log
 
-    def run(self, argv: list[str], *, input_text: str | None = None, stdout_path: Path | None = None) -> Any:
+    def run(self, argv: list[str], *, input_text: str | None = None, stdout_path: Path | None = None,
+            stream: bool = False) -> Any:
         self.log("  $ " + " ".join(argv))
         try:
+            if stream:  # live output (rollouts take minutes)
+                return subprocess.run(argv, cwd=self.cwd, check=False)
             if stdout_path is not None:
-                with open(stdout_path, "xb") as out:
-                    return subprocess.run(argv, cwd=self.cwd, input=(input_text or "").encode(),
-                                          stdout=out, stderr=subprocess.PIPE, check=False)
-            return subprocess.run(argv, cwd=self.cwd, input=input_text, capture_output=True, text=True, check=False)
+                with open(stdout_path, "ab") as out:
+                    res = subprocess.run(argv, cwd=self.cwd, input=(input_text or "").encode(),
+                                         stdout=out, stderr=subprocess.PIPE, check=False)
+                err = res.stderr.decode(errors="replace")
+                return SimpleNamespace(returncode=res.returncode, stdout="", stderr=err)
+            res = subprocess.run(argv, cwd=self.cwd, input=input_text, capture_output=True, text=True, check=False)
         except FileNotFoundError:
-            return SimpleNamespace(returncode=127, stdout="", stderr=f"{argv[0]}: not found")
+            res = SimpleNamespace(returncode=127, stdout="", stderr=f"{argv[0]}: not found")
+        if res.returncode != 0 and res.stderr:
+            self.log(res.stderr.rstrip())
+        return res
 
 
 # --------------------------------------------------------------------------- state machine
@@ -281,7 +306,7 @@ class Rotator:
         if not script.exists():
             raise RotationError(f"{script} not found (symlink deploy-rollout.sh, notify-discord.sh and "
                                 "image-diff.sh into this dir)")
-        r = self.runner.run([str(script), "roll", *services])
+        r = self.runner.run([str(script), "roll", *services], stream=True)
         if r.returncode != 0:
             raise RotationError(f"deploy-rollout.sh roll {' '.join(services)} failed (exit {r.returncode})")
 
@@ -342,18 +367,6 @@ class Rotator:
             return get_env(env, n)
 
         k = s.kind
-        if k == mf.GENERATED_WITH_FALLBACK:
-            old, fb = cur(s.name), s.fallback_var
-            if not old:
-                raise RotationError(f"{s.name} is unset")
-            if "," in old:
-                raise RotationError(f"current {s.name} contains a comma and cannot be kept in the {fb} list")
-            edits = {s.name: generate_secret(), fb: ",".join(csv_prepend(csv_split(cur(fb)), old))}
-            if s.name == "SECRET_KEY" and not csv_split(cur("UNSUBSCRIBE_SIGNING_KEYS")):
-                # Pin: links already in mailboxes keep verifying once SECRET_KEY's fallback is finalized away.
-                # Deliberately not in `touched`: a rollback keeps it (it is harmless and long-lived).
-                edits["UNSUBSCRIBE_SIGNING_KEYS"] = f"{generate_secret()},{old}"
-            return Staged(edits, [s.name, fb], list(s.services))
         if k == mf.GENERATED_FILE_WITH_INACTIVE:
             old, fb = cur(s.name), s.fallback_var
             if not old:
@@ -376,6 +389,8 @@ class Rotator:
             self.out(s.instructions)
             new = csv_split(self.prompt_secret(f"New {s.name} value(s), comma-separated (hidden): "))
             old = csv_split(cur(s.name))
+            if not old and cur("STRIPE_WEBHOOK_SECRET"):  # legacy single secret: keep it valid through the grace period
+                old = [cur("STRIPE_WEBHOOK_SECRET") or ""]
             if not new or set(new) & set(old):
                 raise RotationError("need at least one new value, none already in the list")
             return Staged({s.name: ",".join(old + new)}, [s.name], list(s.services),
@@ -418,9 +433,10 @@ class Rotator:
                       before=lambda: self._alter_role(user, db, new))
 
     def _alter_role(self, user: str, db: str, password: str) -> None:
-        sql = f"ALTER ROLE \"{user}\" PASSWORD '{password.replace(chr(39), chr(39) * 2)}';\n"
+        # Only a SCRAM verifier goes to the server: a failed statement is logged in full by Postgres.
+        sql = f"ALTER ROLE \"{user}\" PASSWORD '{scram_verifier(password)}';\n"
         r = self.compose("exec", "-T", "revel_postgres", "psql", "-U", user, "-d", db, "-q",
-                         "-v", "ON_ERROR_STOP=1", input_text=sql)  # value on stdin, not argv
+                         "-v", "ON_ERROR_STOP=1", input_text=sql)  # stdin, not argv
         if r.returncode != 0:
             raise RotationError(f"ALTER ROLE failed (exit {r.returncode})")
 
@@ -436,21 +452,50 @@ class Rotator:
             raise RotationError("the running backend lacks `rotate_encrypted_fields` (needs the release with "
                                 "key fallbacks, backend #1283): refusing to stage SECRET_KEY / SALT_KEY")
 
+    def _check_stageable(self, name: str) -> None:
+        entry = self.load_state()["secrets"].get(name, {})
+        if MANIFEST[name].kind == mf.GENERATED_WITH_FALLBACK and entry.get("step") == "staged" \
+                and entry.get("phase") == 1:
+            return  # a previous run stopped after phase 1: resume with the promotion
+        next_step(entry.get("step", "idle"), "stage")
+
+    @staticmethod
+    def _units(names: list[str]) -> list[list[str]]:
+        """Group names into atomic stage units: a bundle is one unit, anything else stands alone."""
+        seen: set[str] = set()
+        units: list[list[str]] = []
+        for n in names:
+            if n in seen:
+                continue
+            members = list(mf.BUNDLES[MANIFEST[n].bundle]) if MANIFEST[n].bundle else [n]
+            seen.update(members)
+            units.append(members)
+        return units
+
     def stage(self, names: list[str], batch: bool = False) -> int:
         """Stage each secret; returns the number of failures."""
+        if "DB_PASSWORD" in names and (len(names) > 1 or batch):
+            raise RotationError("DB_PASSWORD is staged alone (no other secrets, no --batch): "
+                                "ALTER ROLE, recreate pgbouncer/postgres-exporter, roll the app")
         failures = 0
         if any(MANIFEST[n].kind == mf.GENERATED_WITH_FALLBACK for n in names):
             self.require_fallback_support()
         pending: list[str] = []
-        for name in names:
+        for unit in self._units(names):
+            fallback = MANIFEST[unit[0]].kind == mf.GENERATED_WITH_FALLBACK  # two-phase: always rolls itself
             try:
-                next_step(self.step_of(name), "stage")
-                if self._stage_one(MANIFEST[name], roll=not batch):
-                    pending.append(name)
+                for n in unit:
+                    self._check_stageable(n)
+                if fallback:
+                    staged = self._stage_fallback(MANIFEST[unit[0]])
+                else:
+                    staged = self._stage_group([MANIFEST[n] for n in unit], roll=not batch)
+                if batch and not fallback:
+                    pending.extend(staged)
             except RotationError as e:
-                self.out(f"[{name}] ERROR: {e}")
+                self.out(f"[{', '.join(unit)}] ERROR: {e}")
                 failures += 1
-        if batch and pending:
+        if pending:
             started = self.now()
             state = self.load_state()["secrets"]
             services = sorted({x for n in pending if state[n].get("roll", True) for x in MANIFEST[n].services},
@@ -468,52 +513,113 @@ class Rotator:
                 failures += 1
         return failures
 
-    def _stage_one(self, s: mf.Secret, roll: bool) -> bool:
+    def _stage_group(self, secs: list[mf.Secret], roll: bool) -> list[str]:
+        """Stage one secret or one bundle with a single backup and a single roll."""
         env = self.env_text()
-        if not get_env(env, s.name) and s.kind != mf.LIST_APPEND:
-            self.out(f"[{s.name}] unset: nothing to rotate, skipped")
-            return False
-        self.out(f"[{s.name}] staging ({s.kind})")
-        plan = self.prepare(s, env)
-        if plan is None:
-            self.out(f"[{s.name}] not configured, skipped")
-            return False
-        now = self.now()
+        plans: list[tuple[mf.Secret, Staged]] = []
+        for s in secs:
+            if not get_env(env, s.name) and s.kind != mf.LIST_APPEND:
+                self.out(f"[{s.name}] unset: nothing to rotate, skipped")
+                continue
+            self.out(f"[{s.name}] staging ({s.kind})")
+            plan = self.prepare(s, env)
+            if plan is None:
+                self.out(f"[{s.name}] not configured, skipped")
+                continue
+            plans.append((s, plan))
+        if plans:
+            self._commit(plans, roll)
+        return [s.name for s, _ in plans]
+
+    def _stage_fallback(self, s: mf.Secret) -> list[str]:
+        """Two phases, because old containers run next to new ones during a rollout and an old
+        container that cannot decrypt a row written under the new key would store it back corrupted.
+        Phase 1 makes every container able to READ the new key; phase 2 starts WRITING with it."""
+        name, fb = s.name, s.fallback_var or ""
+        env, entry = self.env_text(), self.load_state()["secrets"].get(name, {})
+        if not (entry.get("step") == "staged" and entry.get("phase") == 1):
+            old = get_env(env, name)
+            if not old:
+                raise RotationError(f"{name} is unset")
+            if "," in old:
+                raise RotationError(f"current {name} contains a comma and cannot be kept in the {fb} list")
+            existing = csv_split(get_env(env, fb))
+            edits = {fb: ",".join(existing + [generate_secret()])}
+            if name == "SECRET_KEY" and not csv_split(get_env(env, "UNSUBSCRIBE_SIGNING_KEYS")):
+                # Pin: links already in mailboxes keep verifying once SECRET_KEY's fallback is finalized away.
+                # Not in `touched`: a rollback keeps it (harmless and long-lived).
+                edits["UNSUBSCRIBE_SIGNING_KEYS"] = f"{generate_secret()},{old}"
+            self.out(f"[{name}] phase 1/2: introduce the new key as a fallback")
+            self._commit([(s, Staged(edits, [fb], list(s.services),
+                                     {"phase": 1, "new_index": len(existing), "ever_primary": False}))], True)
+            entry = self.load_state()["secrets"][name]
+        env = self.env_text()
+        fallbacks, old = csv_split(get_env(env, fb)), get_env(env, name) or ""
+        if entry["new_index"] >= len(fallbacks):
+            raise RotationError(f"{fb} no longer holds the introduced key; fix by hand")
+        new = fallbacks[entry["new_index"]]
+        edits = {name: new, fb: ",".join([old] + [x for x in fallbacks if x not in (old, new)])}
+        self.out(f"[{name}] phase 2/2: promote the new key")
+        self._commit([(s, Staged(edits, [name, fb], list(s.services), {"phase": 2, "ever_primary": True}))],
+                     True, resume=True)
+        return [name]
+
+    def _commit(self, plans: list[tuple[mf.Secret, Staged]], roll: bool, resume: bool = False) -> None:
+        env, now = self.env_text(), self.now()
         backup = backup_file(self.env_path, now)
         try:
-            if plan.before:
-                plan.before()
-            for var, val in plan.edits.items():
-                env = set_env(env, var, val)
+            for _, p in plans:
+                if p.before:
+                    p.before()
+            for _, p in plans:
+                for var, val in p.edits.items():
+                    env = set_env(env, var, val)
             write_atomic(self.env_path, env)
         except BaseException:
             backup.unlink(missing_ok=True)
-            if "new_key_file" in plan.extra:
-                Path(plan.extra["new_key_file"]).unlink(missing_ok=True)
+            for _, p in plans:
+                if "new_key_file" in p.extra:
+                    Path(p.extra["new_key_file"]).unlink(missing_ok=True)
             raise
-        self.update_state(
-            s.name, step="staged", kind=s.kind, staged_at=now.isoformat(), backup=backup.name, backups=[backup.name],
-            vars=plan.touched, recreate=plan.recreate, roll=plan.roll,
-            grace_end=(now + s.grace).isoformat() if s.grace else None, **plan.extra)
-        if roll:
-            ok = False
-            try:
-                if plan.roll:
-                    self.roll(plan.services, plan.recreate)
-                ok = self.verify(plan.services, now)
-            except RotationError as e:
-                self.out(f"[{s.name}] ERROR: {e}")
-            if not ok:
-                self.out(f"[{s.name}] verification failed: rolling back")
+        state = self.load_state()
+        for s, p in plans:
+            old = state["secrets"].get(s.name, {}) if resume else {}
+            extra = dict(p.extra, **({"b1": backup.name} if p.extra.get("phase") == 1 else {}))
+            entry = dict(old)
+            entry.update(
+                step="staged", kind=s.kind, staged_at=now.isoformat(), backup=backup.name,
+                backups=old.get("backups", []) + [backup.name], vars=p.touched, recreate=p.recreate, roll=p.roll,
+                grace_end=(now + s.grace).isoformat() if s.grace and p.extra.get("phase", 2) == 2 else None,
+                updated_at=now.isoformat(), **extra)
+            state["secrets"][s.name] = entry
+        self.save_state(state)
+        if not roll:
+            return
+        services = sorted({x for _, p in plans if p.roll for x in p.services}, key=_svc_order)
+        recreate = sorted({x for _, p in plans for x in p.recreate})
+        ok = False
+        try:
+            self.roll(services, recreate)
+            ok = self.verify(sorted({x for _, p in plans for x in p.services}, key=_svc_order), now)
+        except RotationError as e:
+            self.out(f"ERROR: {e}")
+        if not ok:
+            self.out("verification failed: rolling back")
+            for s, _ in plans:
                 self.rollback(s.name, reason="verify failed")
-                raise RotationError("verification failed, rolled back")
-        return True
+            raise RotationError("verification failed, rolled back")
 
     # ---- rollback
     def rollback(self, name: str, reason: str = "requested") -> None:
+        """Restore the secret's previous values. A key that was ever primary or introduced is never
+        removed: rolling back phase 2 keeps the new key in the fallbacks."""
         entry = self.load_state()["secrets"].get(name, {})
         next_step(entry.get("step", "idle"), "rollback")
         s = MANIFEST[name]
+        fallback = s.kind == mf.GENERATED_WITH_FALLBACK
+        if fallback and entry.get("phase") == 1 and entry.get("ever_primary"):
+            raise RotationError("the new key has been primary: it stays in the fallbacks. Re-run `stage` to "
+                                "promote it again, or `migrate` once phase 2 is complete")
         old_env = (self.base / entry["backup"]).read_text(encoding="utf-8")
         env = self.env_text()
         for var in entry["vars"]:
@@ -536,16 +642,32 @@ class Rotator:
             self.verify(list(s.services), started)
         except RotationError as e:
             self.out(f"[{name}] WARNING: re-roll after rollback failed: {e}")
-        (self.base / entry["backup"]).unlink(missing_ok=True)
-        self.update_state(name, step="idle", rolled_back_reason=reason)
+        if fallback and entry.get("phase") == 2:
+            # Back to "introduced": old key primary, new key kept; its backup stays until finalize.
+            self.update_state(name, phase=1, backup=entry["b1"], vars=[s.fallback_var], grace_end=None)
+            self.out(f"[{name}] rolled back to phase 1 ({reason}); the new key stays in {s.fallback_var}")
+            return
+        self.update_state(name, step="idle", backups=[], rolled_back_reason=reason)
+        self._unlink_unreferenced(entry.get("backups", [entry["backup"]]))
         self.out(f"[{name}] rolled back ({reason})")
+
+    def _unlink_unreferenced(self, files: list[str]) -> None:
+        """Delete env backups no live (staged/migrated) secret still points at (bundles share one)."""
+        live = {b for e in self.load_state()["secrets"].values()
+                if e.get("step") in ("staged", "migrated") for b in e.get("backups", [])}
+        for f in files:
+            if f not in live:
+                (self.base / f).unlink(missing_ok=True)
 
     # ---- migrate
     def migrate(self) -> None:
-        targets = [n for n, e in self.load_state()["secrets"].items()
-                   if e.get("step") == "staged" and MANIFEST[n].migrate]
-        if not targets:
+        staged = {n: e for n, e in self.load_state()["secrets"].items()
+                  if e.get("step") == "staged" and MANIFEST[n].migrate}
+        if not staged:
             raise RotationError("nothing staged that needs a migrate")
+        half = [n for n, e in staged.items() if e.get("phase") != 2]
+        if half:
+            raise RotationError(f"{', '.join(half)}: phase 2 (promotion) is not complete: re-run `stage` first")
         self.require_fallback_support()
         for flags in ([], ["--verify"]):
             r = self.exec_web("python", "manage.py", "rotate_encrypted_fields", *flags)
@@ -553,7 +675,7 @@ class Rotator:
                 self.out(r.stdout.rstrip())
             if r.returncode != 0:
                 raise RotationError(f"rotate_encrypted_fields {' '.join(flags)} failed (exit {r.returncode})")
-        for n in targets:
+        for n in staged:
             self.update_state(n, step=next_step("staged", "migrate"), migrated_at=self.now().isoformat())
             self.out(f"[{n}] migrated + verified")
 
@@ -563,6 +685,9 @@ class Rotator:
         if shutil.which("age") is None or not recipient:
             raise RotationError("archiving needs `age` installed and ROTATION_AGE_RECIPIENT set "
                                 "(or pass --no-archive explicitly)")
+        trial = self.runner.run(["age", "-r", recipient], input_text="x", stdout_path=Path(os.devnull))
+        if trial.returncode != 0:
+            raise RotationError("age rejected ROTATION_AGE_RECIPIENT (trial encryption failed)")
         return recipient
 
     def archive(self, recipient: str, name: str, lines: list[str]) -> Path:
@@ -575,9 +700,19 @@ class Rotator:
         r = self.runner.run(["age", "-r", recipient], input_text=text, stdout_path=path)
         if r.returncode != 0:
             path.unlink(missing_ok=True)
-            raise RotationError("age failed: retired values were NOT archived; backups kept")
+            raise RotationError("age failed: retired values were NOT archived; nothing was changed")
         os.chmod(path, 0o600)
         return path
+
+    def confined_key_path(self, container_path: str) -> Path:
+        """Host path of a key file, refused unless it really lives inside the certs dir (symlinks resolved)."""
+        resolved = self.host_path(container_path).resolve()
+        if (self.base / "certs").resolve() not in resolved.parents:
+            raise RotationError(f"{container_path} resolves outside {self.base}/certs: refusing")
+        return resolved
+
+    def delete_retired_key(self, container_path: str) -> None:
+        self.confined_key_path(container_path).unlink(missing_ok=True)
 
     def finalize(self, names: list[str], force: bool = False, archive: bool = True) -> int:
         """Finalize each secret; returns the number of failures."""
@@ -600,18 +735,19 @@ class Rotator:
         grace_end = entry.get("grace_end")
         if grace_end and self.now() < datetime.fromisoformat(grace_end) and not force:
             raise RotationError(f"grace window open until {grace_end}; use --force to override")
-        env, old_env = self.env_text(), (self.base / entry["backup"]).read_text(encoding="utf-8")
+        env = self.env_text()
         edits: dict[str, str] = {}
         retired: list[str] = []
+        key_files: list[str] = []
         if s.kind == mf.GENERATED_WITH_FALLBACK:
             retired = [f"{name}={v}" for v in csv_split(get_env(env, s.fallback_var))]
             edits = {s.fallback_var: ""}
         elif s.kind == mf.GENERATED_FILE_WITH_INACTIVE:
-            paths = entry["retired_paths"]
-            for p in paths:
-                data = self.host_path(p).read_bytes()
+            key_files = entry["retired_paths"]
+            for p in key_files:
+                data = self.confined_key_path(p).read_bytes()
                 retired.append(f"OIDC_SIGNING_KEY_FILE:{p}={base64.b64encode(data).decode()}")
-            edits = {s.fallback_var: ",".join(csv_drop(csv_split(get_env(env, s.fallback_var)), paths))}
+            edits = {s.fallback_var: ",".join(csv_drop(csv_split(get_env(env, s.fallback_var)), key_files))}
         elif s.kind == mf.LIST_APPEND:
             items, n_old = csv_split(get_env(env, name)), entry["old_count"]
             if len(items) != n_old + entry["new_count"]:
@@ -619,11 +755,17 @@ class Rotator:
             retired = [f"{name}={v}" for v in items[:n_old]]
             edits = {name: ",".join(items[n_old:])}
         else:  # one-shot kinds: the retired value is the pre-rotation one held in the backup
+            old_env = (self.base / entry["backup"]).read_text(encoding="utf-8")
             retired = [f"{v}={get_env(old_env, v)}" for v in entry["vars"] if get_env(old_env, v)]
-        backups = [self.base / b for b in entry.get("backups", [entry["backup"]])]
+        # 1. Archive FIRST: a failure here leaves .env, the state and the backups untouched.
+        if recipient:
+            where = self.archive(recipient, name, retired)
+            self.out(f"[{name}] archived {len(retired)} retired value(s) to {where.relative_to(self.base)}")
+        else:
+            self.out(f"[{name}] --no-archive: {len(retired)} retired value(s) were NOT archived")
+        # 2. Edit .env, roll, verify.
         if edits:
             fin_backup = backup_file(self.env_path, self.now())
-            backups.append(fin_backup)
             started = self.now()
             for var, val in edits.items():
                 env = set_env(env, var, val)
@@ -639,16 +781,21 @@ class Rotator:
                 for var in edits:
                     restored = set_env(restored, var, get_env(fb_text, var) or "")
                 write_atomic(self.env_path, restored)
-                self.roll(list(s.services))
+                fin_backup.unlink(missing_ok=True)  # plaintext copy no longer needed
+                try:
+                    self.roll(list(s.services))
+                except RotationError:
+                    raise RotationError(
+                        ".env was restored but the services are out of sync with it: re-roll with "
+                        f"`./deploy-rollout.sh roll {' '.join(s.services)}` before doing anything else") from None
                 raise RotationError("verification failed after dropping the old values; restored them")
+            fin_backup.unlink(missing_ok=True)
+        # 3. Clean up: only now are the retired values safe on disk elsewhere.
         if recipient:
-            where = self.archive(recipient, name, retired)
-            self.out(f"[{name}] archived {len(retired)} retired value(s) to {where.relative_to(self.base)}")
-        else:
-            self.out(f"[{name}] --no-archive: {len(retired)} retired value(s) were NOT archived")
-        for b in backups:
-            b.unlink(missing_ok=True)
-        self.update_state(name, step="finalized", finalized_at=self.now().isoformat())
+            for p in key_files:
+                self.delete_retired_key(p)
+        self.update_state(name, step="finalized", finalized_at=self.now().isoformat(), backups=[])
+        self._unlink_unreferenced(entry.get("backups", [entry["backup"]]))
         self.out(f"[{name}] finalized")
 
     # ---- reporting
@@ -657,7 +804,7 @@ class Rotator:
         rows: list[tuple[str, ...]] = []
         for n, s in MANIFEST.items():
             e = state.get(n, {})
-            rows.append((n, s.kind, "set" if get_env(env, n) else "unset", e.get("step", "idle"),
+            rows.append((n, s.kind, "set" if get_env(env, n) else "unset", e.get("step", "idle") + (f" (phase {e['phase']})" if e.get("phase") else ""),
                          (e.get("grace_end") or "-")[:19]))
         return rows
 
@@ -710,6 +857,11 @@ def select(names: list[str], group: str | None) -> list[str]:
     if group:
         groups = {"self": ("self",), "thirdparty": ("thirdparty",), "all": ("self", "thirdparty")}
         names = names + [n for n, s in MANIFEST.items() if s.group in groups[group] and n not in names]
+    for n in names:
+        bundle = MANIFEST[n].bundle
+        if bundle and not set(mf.BUNDLES[bundle]) <= set(names):
+            raise RotationError(f"{n} belongs to the '{bundle}' bundle and is staged atomically with "
+                                f"{', '.join(mf.BUNDLES[bundle])}: name them all")
     return names
 
 

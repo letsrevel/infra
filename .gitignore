@@ -26,3 +26,4 @@ certs/*
 rotation/state.json
 rotation/archive/
 .env.bak.*
+__pycache__/

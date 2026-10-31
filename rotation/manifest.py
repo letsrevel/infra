@@ -5,7 +5,7 @@ the live ``.env`` so a newly added secret cannot be silently skipped by a rotati
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 
 GENERATED_WITH_FALLBACK = "generated_with_fallback"
@@ -31,6 +31,7 @@ class Secret:
     fallback_var: str | None = None  # *_FALLBACKS / *_INACTIVE_PATHS companion variable
     extra_vars: tuple[str, ...] = ()  # other managed variables (not rotated themselves)
     migrate: bool = False  # needs `rotate_encrypted_fields` between stage and finalize
+    bundle: str | None = None  # paired credentials: staged atomically, in one roll (see BUNDLES)
 
     @property
     def group(self) -> str:
@@ -135,7 +136,14 @@ _SECRETS: tuple[Secret, ...] = (
            instructions="Reset through the grafana CLI (the env var only applies at first init)."),
 )
 
-MANIFEST: dict[str, Secret] = {s.name: s for s in _SECRETS}
+# Credentials that only work as a set: naming any member means naming them all.
+BUNDLES: dict[str, tuple[str, ...]] = {
+    "aws": ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"),
+    "apple_wallet": ("APPLE_WALLET_CERT_PATH", "APPLE_WALLET_KEY_PATH", "APPLE_WALLET_KEY_PASSWORD"),
+}
+_BUNDLE_OF = {n: b for b, names in BUNDLES.items() for n in names}
+
+MANIFEST: dict[str, Secret] = {s.name: replace(s, bundle=_BUNDLE_OF.get(s.name)) for s in _SECRETS}
 
 # Keys that look secret but are not (or are managed outside the tool).
 EXEMPT_NAMES = frozenset({
