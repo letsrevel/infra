@@ -1,0 +1,35 @@
+# Secret-rotation tooling: unit tests, manifest drift check (every secret-looking key in
+# .env.example must be in rotation/manifest.py) and shellcheck of the rollout script.
+name: Rotation tooling
+
+on:
+  pull_request:
+    paths:
+      - "rotation/**"
+      - ".env.example"
+      - "deploy-rollout.sh"
+      - ".github/workflows/rotation.yml"
+  push:
+    branches: [main]
+    paths:
+      - "rotation/**"
+      - ".env.example"
+      - "deploy-rollout.sh"
+
+permissions:
+  contents: read
+
+jobs:
+  rotation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10" # the oldest interpreter the tool supports
+      - name: Unit tests
+        run: python3 -m unittest rotation/test_rotate.py
+      - name: Manifest drift check
+        run: python3 rotation/rotate.py check
+      - name: shellcheck deploy-rollout.sh
+        run: shellcheck -x deploy-rollout.sh
