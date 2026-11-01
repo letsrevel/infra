@@ -116,7 +116,7 @@ This reduces notification spam by bundling related alerts.
 - **CeleryWorkerDown** - Background task worker down
 
 #### Warning
-- **HighHTTP4xxRate** - 4xx errors above 20%
+- **HighHTTP4xxRate** - 4xx errors above 20% on routed views (unrouted scanner 404s and the TLS ask check excluded)
 - **SlowHTTPRequests** - 95th percentile latency above 2s
 - **HighCeleryQueueLength** - More than 100 pending tasks
 - **HighCeleryTaskFailureRate** - Task failure rate above 10%
