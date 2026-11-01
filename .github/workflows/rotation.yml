@@ -8,6 +8,9 @@ on:
       - "rotation/**"
       - ".env.example"
       - "deploy-rollout.sh"
+      - "notify-discord.sh"
+      - "image-diff.sh"
+      - "docker-compose.yml"
       - ".github/workflows/rotation.yml"
   push:
     branches: [main]
@@ -15,6 +18,9 @@ on:
       - "rotation/**"
       - ".env.example"
       - "deploy-rollout.sh"
+      - "notify-discord.sh"
+      - "image-diff.sh"
+      - "docker-compose.yml"
 
 permissions:
   contents: read
