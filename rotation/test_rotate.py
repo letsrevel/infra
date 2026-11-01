@@ -917,6 +917,60 @@ class NoValueLeakTests(Base):
         self.assertNotIn("olddbpass", env_now)
 
 
+class ReviewRound5Tests(Base):
+    def setUp(self) -> None:
+        super().setUp()
+        (self.tmp / ".env").write_text(ENV + "ROTATION_AGE_RECIPIENT=age1abc\n")
+        which = mock.patch.object(r.shutil, "which", return_value="/usr/bin/age")
+        which.start()
+        self.addCleanup(which.stop)
+
+    def test_rollback_aborts_untouched_when_the_live_credential_cannot_be_restored(self) -> None:
+        failing = [False]
+        rot = self.make(maintenance=True, files=[r.DB_CONFIRM_PHRASE],
+                        fail=lambda line: failing[0] and "psql" in line)
+        self.assertEqual(rot.stage(["DB_PASSWORD"]), 0)
+        staged_env = (self.tmp / ".env").read_text()
+        baks, n_calls = sorted(self.tmp.glob(".env.bak.*")), len(self.runner.calls)
+        failing[0] = True
+        with self.assertRaises(r.RotationError) as cm:
+            rot.rollback("DB_PASSWORD")
+        self.assertIn("still the NEW one", str(cm.exception))
+        self.assertEqual((self.tmp / ".env").read_text(), staged_env)  # .env keeps the live value
+        self.assertEqual(rot.step_of("DB_PASSWORD"), "staged")  # retryable
+        self.assertEqual(sorted(self.tmp.glob(".env.bak.*")), baks)
+        self.assertFalse([c for c in self.runner.calls[n_calls:] if "deploy-rollout.sh" in " ".join(c.argv)])
+        failing[0] = False
+        rot.rollback("DB_PASSWORD")  # the retry succeeds
+        self.assertEqual(self.env("DB_PASSWORD"), "olddbpass")
+        self.assertEqual(rot.step_of("DB_PASSWORD"), "idle")
+
+    def test_failed_env_write_in_finalize_leaves_no_plaintext_backup(self) -> None:
+        rot = self.make()
+        rot.stage(["SALT_KEY"])
+        rot.migrate()
+        baks = sorted(self.tmp.glob(".env.bak.*"))
+        with mock.patch.object(r, "write_atomic", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                rot._finalize_one("SALT_KEY", False, "age1abc")
+        self.assertEqual(sorted(self.tmp.glob(".env.bak.*")), baks)
+        self.assertEqual(rot.step_of("SALT_KEY"), "migrated")
+
+    def test_two_archives_in_the_same_second_get_distinct_private_files(self) -> None:
+        rot = self.make()
+        paths = [rot.archive("age1abc", "SALT_KEY", [f"SALT_KEY=v{i}"]) for i in range(3)]
+        self.assertEqual(len(set(paths)), 3)
+        for p in paths:
+            self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o600)
+
+    def test_runner_writes_a_fresh_file_not_an_appended_stream(self) -> None:
+        out = self.tmp / "o.bin"
+        out.write_bytes(b"OLD")
+        r.Runner(self.tmp, log=lambda _l: None).run(
+            [sys.executable, "-c", "print('new', end='')"], stdout_path=out)
+        self.assertEqual(out.read_bytes(), b"new")
+
+
 class ManifestTests(unittest.TestCase):
     def test_every_entry_is_well_formed(self) -> None:
         kinds = {mf.GENERATED_WITH_FALLBACK, mf.GENERATED_FILE_WITH_INACTIVE, mf.LIST_APPEND, mf.THIRD_PARTY,

@@ -192,7 +192,7 @@ class Runner:
             if stream:  # live output (rollouts take minutes)
                 return subprocess.run(argv, cwd=self.cwd, check=False)
             if stdout_path is not None:
-                with open(stdout_path, "ab") as out:
+                with open(stdout_path, "wb") as out:  # a fresh stream: concatenated age streams do not decrypt
                     res = subprocess.run(argv, cwd=self.cwd, input=(input_text or "").encode(),
                                          stdout=out, stderr=subprocess.PIPE, check=False)
                 err = res.stderr.decode(errors="replace")
@@ -684,7 +684,13 @@ class Rotator:
             if s.kind == mf.GRAFANA_ADMIN and old_pw:
                 self._grafana_reset(old_pw)
         except RotationError as e:
-            self.out(f"[{name}] WARNING: could not restore the live credential: {e}")
+            # Abort before touching .env or rolling: consumers must keep the value that still matches
+            # the live credential. The state stays "staged", so `rollback` can simply be re-run.
+            self.out(f"[{name}] ERROR: could not restore the live credential: {e}")
+            raise RotationError(
+                f"{name}: the live credential is still the NEW one, and .env, the state and the running "
+                f"services were left unchanged (they match it). Fix the service, then re-run "
+                f"`rollback {name}`") from None
         write_atomic(self.env_path, env)
         if entry.get("new_key_file"):
             Path(entry["new_key_file"]).unlink(missing_ok=True)
@@ -746,9 +752,20 @@ class Rotator:
     def archive(self, recipient: str, name: str, lines: list[str]) -> Path:
         self.archive_dir.mkdir(parents=True, exist_ok=True)
         stamp = self.now()
-        path = self.archive_dir / f"{stamp.strftime('%Y-%m-%d')}.age"
-        if path.exists():  # one age stream per file: concatenated streams do not decrypt
-            path = self.archive_dir / f"{stamp.strftime('%Y-%m-%d-%H%M%S')}-{name}.age"
+        # One age stream per file. The file is created exclusively (0600), so two finalizations in the
+        # same second can never pick, or append to, the same path.
+        sec = stamp.strftime("%Y-%m-%d-%H%M%S")
+        candidates = [f"{stamp.strftime('%Y-%m-%d')}.age", f"{sec}-{name}.age"]
+        candidates += [f"{sec}-{name}-{n}.age" for n in range(1, 100)]
+        for cand in candidates:
+            path = self.archive_dir / cand
+            try:
+                os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise RotationError("could not create a unique archive file")
         text = f"# retired {stamp.isoformat()} {name}\n" + "\n".join(lines) + "\n"
         r = self.runner.run(["age", "-r", recipient], input_text=text, stdout_path=path)
         if r.returncode != 0:
@@ -826,9 +843,13 @@ class Rotator:
         if edits:
             fin_backup = backup_file(self.env_path, self.now())
             started = self.now()
-            for var, val in edits.items():
-                env = set_env(env, var, val)
-            write_atomic(self.env_path, env)
+            try:
+                for var, val in edits.items():
+                    env = set_env(env, var, val)
+                write_atomic(self.env_path, env)
+            except BaseException:
+                fin_backup.unlink(missing_ok=True)  # plaintext copy no longer needed
+                raise
             ok = False
             try:
                 self.roll(list(s.services))

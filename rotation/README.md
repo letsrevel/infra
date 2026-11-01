@@ -65,6 +65,10 @@ manually or after a failed verify, makes the old key primary again and KEEPS the
 `*_FALLBACKS`; its `.env.bak.*` is kept until `finalize`. After that, `rollback` is refused: re-run
 `stage` to promote again.
 
+If the live credential (`DB_PASSWORD`, `GRAFANA_ADMIN_PASSWORD`) cannot be restored, `rollback`
+aborts before touching `.env` or rolling anything: the credential is still the new one, `.env` and the
+state still match it, and you re-run `rollback` once the service is back.
+
 ### Bundles
 
 Credentials that only work as a set are staged atomically, with one backup and one roll, and
