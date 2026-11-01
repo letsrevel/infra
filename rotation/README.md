@@ -167,27 +167,36 @@ recreate it. Do not run that casually afterwards; use `deploy-rollout.sh deploy`
 Columns in an old dump are encrypted under the `SECRET_KEY` x `SALT_KEY` of that time, and the
 retired values are in `rotation/archive/*.age`.
 
-1. Pick the archive file for the epoch of the backup (the names are dated) and, from the infra root, copy its
-   retired keys into the `*_FALLBACKS` variables of `.env`. The secrets never reach the terminal: the archive is
-   decrypted into a fresh `mktemp -d` directory (mode 0700) that the subshell deletes on exit, and only "set" /
-   "not in this archive" is printed. Values already in a `*_FALLBACKS` variable are kept.
+1. From the infra root, copy the retired keys into the `*_FALLBACKS` variables of `.env`. List **every**
+   archive file written since the backup was taken (the names are dated): `finalize` writes one file per secret,
+   so rotating both keys leaves two files, and one file can hold several retired values. Every retired
+   `SECRET_KEY` / `SALT_KEY` found is added (an old dump decrypts under any of them) and values already in a
+   `*_FALLBACKS` variable are kept. The secrets never reach the terminal: the archives are decrypted into a fresh
+   `mktemp -d` directory (mode 0700) that the subshell deletes on exit, and only counts are printed. If no key is
+   found, `.env` is left unchanged and the step fails.
 
    ```sh
-   ( d=$(mktemp -d) && trap 'rm -rf "$d"' EXIT &&
-     age -d -i <your identity> -o "$d/archive.env" rotation/archive/<file>.age &&
-     python3 - "$d/archive.env" <<'PY'
+   ( d=$(mktemp -d) && trap 'rm -rf "$d"' EXIT || exit 1
+     for f in rotation/archive/<file>.age rotation/archive/<file>.age; do
+       age -d -i <your identity> -o "$d/$(basename "$f").env" "$f" || exit 1
+     done
+     python3 - "$d"/*.env <<'PY'
    import sys
    from pathlib import Path
    sys.path.insert(0, "rotation")
    from rotate import get_env, set_env, write_atomic
-   old, env = Path(sys.argv[1]).read_text(), Path(".env")
-   text = env.read_text()
+   lines = [line for p in sys.argv[1:] for line in Path(p).read_text().splitlines()]
+   env = Path(".env")
+   text, found = env.read_text(), 0
    for key in ("SECRET_KEY", "SALT_KEY"):
-       value = get_env(old, key)
-       if value:
-           current = [v for v in (get_env(text, f"{key}_FALLBACKS") or "").split(",") if v]
-           text = set_env(text, f"{key}_FALLBACKS", ",".join(current + [value] * (value not in current)))
-       print(f"{key}_FALLBACKS:", "set" if value else "not in this archive")
+       retired = list(dict.fromkeys(v for line in lines if (v := get_env(line, key))))
+       current = [v for v in (get_env(text, f"{key}_FALLBACKS") or "").split(",") if v]
+       if retired:
+           text = set_env(text, f"{key}_FALLBACKS", ",".join(current + [v for v in retired if v not in current]))
+       found += len(retired)
+       print(f"{key}_FALLBACKS: {len(retired)} retired value(s) found")
+   if not found:
+       sys.exit("no SECRET_KEY / SALT_KEY in these archives: .env NOT changed")
    write_atomic(env, text)
    PY
    )
