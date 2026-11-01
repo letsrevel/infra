@@ -525,9 +525,14 @@ class Rotator:
             except RotationError as e:
                 self.out(f"ERROR: {e}")
             if not ok:
-                for n in pending:
-                    self.rollback(n, reason="batch verify failed")
                 failures += 1
+                for n in pending:  # one failing rollback must not leave the others staged
+                    try:
+                        self.rollback(n, reason="batch verify failed")
+                    except RotationError as e:
+                        self.out(f"[{n}] ERROR: {e}")
+                        self.out(f"[{n}] stays staged: fix the cause, then run `rollback {n}`")
+                        failures += 1
         return failures
 
     def _stage_group(self, secs: list[mf.Secret], roll: bool) -> list[str]:
@@ -654,8 +659,16 @@ class Rotator:
             raise RotationError("verification failed; forward-only secret kept (see recovery steps above)")
         if not ok:
             self.out("verification failed: rolling back")
-            for s, _ in plans:
-                self.rollback(s.name, reason="verify failed")
+            stuck: list[str] = []
+            for s, _ in plans:  # a bundle member that cannot roll back must not strand the others
+                try:
+                    self.rollback(s.name, reason="verify failed")
+                except RotationError as e:
+                    self.out(f"[{s.name}] ERROR: {e}")
+                    stuck.append(s.name)
+            if stuck:
+                raise RotationError(f"verification failed and the rollback of {', '.join(stuck)} did not complete: "
+                                    f"they stay staged, re-run `rollback {' '.join(stuck)}`")
             raise RotationError("verification failed, rolled back")
 
     # ---- rollback
@@ -692,15 +705,23 @@ class Rotator:
                 f"services were left unchanged (they match it). Fix the service, then re-run "
                 f"`rollback {name}`") from None
         write_atomic(self.env_path, env)
-        if entry.get("new_key_file"):
-            Path(entry["new_key_file"]).unlink(missing_ok=True)
         started = self.now()
         try:
             if entry.get("roll", True):
                 self.roll(list(s.services), entry.get("recreate"))
-            self.verify(list(s.services) + list(entry.get("recreate") or []), started)
         except RotationError as e:
-            self.out(f"[{name}] WARNING: re-roll after rollback failed: {e}")
+            # .env already holds the old value but the services may still run the new one. Keep the state
+            # "staged" and every backup so `rollback` can be re-run: each step above is idempotent (the
+            # credential reset to the old value, .env rewritten from the same backup, the roll itself),
+            # and the new key file is only deleted after a successful roll.
+            self.out(f"[{name}] ERROR: re-roll after rollback failed: {e}")
+            raise RotationError(
+                f"{name}: .env holds the OLD value but the services may still run the NEW one, and the state "
+                f"stays staged with its backup. Re-run `rollback {name}` once the rollout works") from None
+        if entry.get("new_key_file"):
+            Path(entry["new_key_file"]).unlink(missing_ok=True)
+        if not self.verify(list(s.services) + list(entry.get("recreate") or []), started):
+            self.out(f"[{name}] WARNING: verification after rollback failed: check `rotate.py verify`")
         if fallback and entry.get("phase") == 2:
             # Back to "introduced": old key primary, new key kept; its backup stays until finalize.
             self.update_state(name, phase=1, backup=entry["b1"], vars=[s.fallback_var], grace_end=None)
@@ -1002,8 +1023,14 @@ def main(argv: list[str] | None = None, rotator: Rotator | None = None) -> int:
                                          archive=not args.no_archive) else 0
         elif args.cmd == "rollback":
             names = select([m for n in args.names for m in mf.BUNDLES.get(n, (n,))], None)
-            for n in names:
-                rotator.rollback(n)
+            failed = 0
+            for n in names:  # keep going: a stuck member must not strand the rest of a bundle
+                try:
+                    rotator.rollback(n)
+                except RotationError as e:
+                    print(f"error: {e}", file=sys.stderr)
+                    failed += 1
+            return 1 if failed else 0
     except RotationError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

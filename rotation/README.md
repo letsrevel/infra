@@ -34,7 +34,7 @@ ssh -t revel 'cd infra && ./rotation/rotate.py status'
 | `plan` | Per secret: kind, set/unset, step, grace end, services that get rolled. |
 | `status` | Same without the services column. |
 | `check [--example PATH]` | Drift check. Fails (exit 1) on any key matching `SECRET\|TOKEN\|KEY\|PASSWORD\|WEBHOOK_URL` in `.env.example` (commented ones included) or the live `.env` that is not in the manifest. Lists manifest secrets that are not set in `.env`. Runs in CI against `.env.example`. |
-| `stage <name...>` / `stage --group self\|thirdparty\|all` | Back up `.env` (`.env.bak.<ts>`, 0600), edit only the target lines, record the step, roll the affected services, `verify`. A failed verify restores that secret and rolls again. `--batch` rolls and verifies once for the whole invocation (rolls everything back on failure); it does not apply to `SECRET_KEY` / `SALT_KEY`, which always roll twice. Unset secrets are skipped, except `STRIPE_WEBHOOK_SECRETS` (a list), which is staged even when unset: it is seeded from the legacy `STRIPE_WEBHOOK_SECRET` so no endpoint loses its secret before the grace period. Pressing Enter at a hidden prompt skips that secret (`skipped <NAME>`, not an error; for a bundle, the whole bundle). Paired credentials are bundles (below). `DB_PASSWORD` is refused in `--batch` and next to any other secret. |
+| `stage <name...>` / `stage --group self\|thirdparty\|all` | Back up `.env` (`.env.bak.<ts>`, 0600), edit only the target lines, record the step, roll the affected services, `verify`. A failed verify restores that secret and rolls again. `--batch` rolls and verifies once for the whole invocation (on failure it rolls each secret back, one by one: a secret whose rollback fails is reported, stays `staged` and needs `rollback <name>` re-run, and the exit code is non-zero); it does not apply to `SECRET_KEY` / `SALT_KEY`, which always roll twice. Unset secrets are skipped, except `STRIPE_WEBHOOK_SECRETS` (a list), which is staged even when unset: it is seeded from the legacy `STRIPE_WEBHOOK_SECRET` so no endpoint loses its secret before the grace period. Pressing Enter at a hidden prompt skips that secret (`skipped <NAME>`, not an error; for a bundle, the whole bundle). Paired credentials are bundles (below). `DB_PASSWORD` is refused in `--batch` and next to any other secret. |
 | `migrate` | `rotate_encrypted_fields`, then `rotate_encrypted_fields --verify`, for staged `SECRET_KEY` / `SALT_KEY`. |
 | `verify` | Health, API, frontend, `manage.py check`, error-line budget (below). |
 | `finalize <name...> [--force] [--no-archive]` | After the grace window. Order: trial-encrypt to the recipient, **archive the retired values with `age`**, then edit `.env`, roll, verify, then delete the run's `.env.bak.*` (and, for OIDC, the retired PEM, only if it was archived and sits inside `certs/`). An archive failure leaves `.env`, the state and the backups untouched. If verify fails after the edit, the old values are restored, the plaintext copy is deleted and the roll is repeated; if that roll fails too the tool says the services are out of sync and prints the command to re-roll. |
@@ -68,6 +68,12 @@ manually or after a failed verify, makes the old key primary again and KEEPS the
 If the live credential (`DB_PASSWORD`, `GRAFANA_ADMIN_PASSWORD`) cannot be restored, `rollback`
 aborts before touching `.env` or rolling anything: the credential is still the new one, `.env` and the
 state still match it, and you re-run `rollback` once the service is back.
+
+If the recovery roll fails after `.env` was restored, `rollback` raises as well: `.env` holds the old value,
+but the services may still run the new one. The secret stays `staged` and no backup is deleted (nor the new
+OIDC key file), so re-run `rollback <name>` once the rollout works. Every step is idempotent (credential reset
+to the old value, `.env` rewritten from the same backup, roll). A bundle is rolled back member by member and a
+failing member does not stop the others; re-run `rollback` naming just the stuck members (members already `idle` are refused).
 
 ### Bundles
 

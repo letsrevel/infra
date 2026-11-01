@@ -945,6 +945,62 @@ class ReviewRound5Tests(Base):
         self.assertEqual(self.env("DB_PASSWORD"), "olddbpass")
         self.assertEqual(rot.step_of("DB_PASSWORD"), "idle")
 
+    def test_batch_rollback_failure_of_one_secret_does_not_strand_the_others(self) -> None:
+        seen = {"roll": 0, "reset": 0}
+
+        def fail(line: str) -> bool:
+            if "deploy-rollout.sh" in line:
+                seen["roll"] += 1
+                return seen["roll"] == 1  # the batch roll fails, the rollback rolls succeed
+            if "reset-admin-password" in line:
+                seen["reset"] += 1
+                return seen["reset"] > 1  # staging works, restoring the old password does not
+            return False
+
+        rot = self.make(prompts=["sk_new"], fail=fail)
+        failures = rot.stage(["GRAFANA_ADMIN_PASSWORD", "STRIPE_SECRET_KEY"], batch=True)
+        self.assertEqual(failures, 2)  # the failed batch + the secret whose rollback failed
+        self.assertEqual(rot.step_of("GRAFANA_ADMIN_PASSWORD"), "staged")
+        self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "idle")
+        self.assertEqual(self.env("STRIPE_SECRET_KEY"), "sk_old")
+        self.assertTrue(any("[GRAFANA_ADMIN_PASSWORD] ERROR" in o for o in self.out))
+        seen["reset"] = -99  # the service is back
+        self.assertEqual(r.main(["--dir", str(self.tmp), "rollback", "GRAFANA_ADMIN_PASSWORD"], rotator=rot), 0)
+        self.assertEqual(rot.step_of("GRAFANA_ADMIN_PASSWORD"), "idle")
+
+    def test_rollback_keeps_state_and_backup_when_the_recovery_roll_fails(self) -> None:
+        failing = [False]
+        rot = self.make(prompts=["sk_new"], fail=lambda line: failing[0] and "deploy-rollout.sh" in line)
+        self.assertEqual(rot.stage(["STRIPE_SECRET_KEY"]), 0)
+        baks = sorted(self.tmp.glob(".env.bak.*"))
+        self.assertTrue(baks)
+        failing[0] = True
+        with self.assertRaises(r.RotationError) as cm:
+            rot.rollback("STRIPE_SECRET_KEY")
+        self.assertIn("may still run the NEW one", str(cm.exception))
+        self.assertEqual(self.env("STRIPE_SECRET_KEY"), "sk_old")  # .env already holds the old value
+        self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "staged")
+        self.assertEqual(sorted(self.tmp.glob(".env.bak.*")), baks)
+        failing[0] = False
+        rot.rollback("STRIPE_SECRET_KEY")  # the retry is idempotent
+        self.assertEqual(self.env("STRIPE_SECRET_KEY"), "sk_old")
+        self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "idle")
+        self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
+
+    def test_bundle_member_that_cannot_roll_back_does_not_strand_the_other(self) -> None:
+        (self.tmp / ".env").write_text(ENV + "AWS_ACCESS_KEY_ID=akid_old\nAWS_SECRET_ACCESS_KEY=aws_old\n")
+        failing = [False]
+        rot = self.make(prompts=["akid_new", "aws_new"], fail=lambda line: failing[0] and "deploy-rollout.sh" in line)
+        rot.stage(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"])
+        failing[0] = True
+        self.assertEqual(r.main(["--dir", str(self.tmp), "rollback", "aws"], rotator=rot), 1)
+        self.assertEqual(rot.step_of("AWS_ACCESS_KEY_ID"), "staged")
+        self.assertEqual(rot.step_of("AWS_SECRET_ACCESS_KEY"), "staged")
+        failing[0] = False
+        self.assertEqual(r.main(["--dir", str(self.tmp), "rollback", "aws"], rotator=rot), 0)
+        self.assertEqual((self.env("AWS_ACCESS_KEY_ID"), self.env("AWS_SECRET_ACCESS_KEY")), ("akid_old", "aws_old"))
+        self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
+
     def test_failed_env_write_in_finalize_leaves_no_plaintext_backup(self) -> None:
         rot = self.make()
         rot.stage(["SALT_KEY"])
