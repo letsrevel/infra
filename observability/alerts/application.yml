@@ -27,8 +27,11 @@ groups:
           description: "HTTP 5xx error rate is {{ $value }}% over the last 5 minutes."
 
       # High HTTP 4xx Rate
+      # Only counts routed views. Excluded: "<unnamed view>" (404s for paths Django never routed,
+      # i.e. vuln-scanner probes) and api:tls_ask (Caddy's on-demand TLS check, which answers 404
+      # for every junk SNI handshake by design). Both are background noise, not user-facing errors.
       - alert: HighHTTP4xxRate
-        expr: (sum(rate(django_http_responses_total_by_status_total{status=~"4.."}[5m])) / sum(rate(django_http_responses_total_by_status_total[5m]))) * 100 > 20
+        expr: (sum(rate(django_http_responses_total_by_status_view_method_total{status=~"4..", view!~"<unnamed view>|api:tls_ask"}[5m])) / sum(rate(django_http_responses_total_by_status_view_method_total{view!~"<unnamed view>|api:tls_ask"}[5m]))) * 100 > 20
         for: 10m
         labels:
           severity: warning
