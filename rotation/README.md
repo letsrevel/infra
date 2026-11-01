@@ -167,14 +167,35 @@ recreate it. Do not run that casually afterwards; use `deploy-rollout.sh deploy`
 Columns in an old dump are encrypted under the `SECRET_KEY` x `SALT_KEY` of that time, and the
 retired values are in `rotation/archive/*.age`.
 
-1. Decrypt to a private file, never to the terminal (scrollback and session logs keep it):
-   `umask 077; age -d -i <your identity> -o /tmp/revel-archive.env rotation/archive/<date>.age`, and take the
-   `SECRET_KEY=` / `SALT_KEY=` lines for the epoch of the backup from that file (`grep -c` to check, an editor to copy).
+1. Pick the archive file for the epoch of the backup (the names are dated) and, from the infra root, copy its
+   retired keys into the `*_FALLBACKS` variables of `.env`. The secrets never reach the terminal: the archive is
+   decrypted into a fresh `mktemp -d` directory (mode 0700) that the subshell deletes on exit, and only "set" /
+   "not in this archive" is printed. Values already in a `*_FALLBACKS` variable are kept.
+
+   ```sh
+   ( d=$(mktemp -d) && trap 'rm -rf "$d"' EXIT &&
+     age -d -i <your identity> -o "$d/archive.env" rotation/archive/<file>.age &&
+     python3 - "$d/archive.env" <<'PY'
+   import sys
+   from pathlib import Path
+   sys.path.insert(0, "rotation")
+   from rotate import get_env, set_env, write_atomic
+   old, env = Path(sys.argv[1]).read_text(), Path(".env")
+   text = env.read_text()
+   for key in ("SECRET_KEY", "SALT_KEY"):
+       value = get_env(old, key)
+       if value:
+           current = [v for v in (get_env(text, f"{key}_FALLBACKS") or "").split(",") if v]
+           text = set_env(text, f"{key}_FALLBACKS", ",".join(current + [value] * (value not in current)))
+       print(f"{key}_FALLBACKS:", "set" if value else "not in this archive")
+   write_atomic(env, text)
+   PY
+   )
+   ```
 2. Restore the dump.
-3. Put the retired values into `SECRET_KEY_FALLBACKS` / `SALT_KEY_FALLBACKS` in `.env` (comma-separated, no spaces) and roll: `./deploy-rollout.sh roll web celery_default beat telegram`.
+3. Roll: `./deploy-rollout.sh roll web celery_default beat telegram`.
 4. `docker compose exec -T web python manage.py rotate_encrypted_fields`, then `... --verify`.
-5. Empty the two `*_FALLBACKS` variables again and roll.
-6. Delete the decrypted file: `shred -u /tmp/revel-archive.env` (or `rm -P` on macOS).
+5. Remove the retired values from the two `*_FALLBACKS` variables again and roll.
 
 Each `finalize` writes its own age file (`<UTC date>.age`, or `<date>-<time>-<name>.age` when that exists):
 age streams cannot be concatenated, so nothing is appended. Archived OIDC keys appear as
