@@ -375,7 +375,7 @@ class StateMachineTests(Base):
         self.assertEqual(self.env("GOOGLE_WALLET_SERVICE_ACCOUNT_KEY_PATH"), "/app/certs/b.json")
 
     def test_services_outside_active_profiles_are_not_rolled(self) -> None:
-        rot = self.make(prompts=["x"])
+        rot = self.make(prompts=["x"], files=[r.TELEGRAM_CONFIRM_PHRASE])
         with mock.patch.object(r.Rotator, "active_services", return_value={"web"}):
             rot.stage(["TELEGRAM_BOT_TOKEN"])
         self.assertFalse([x for x in self.runner.argv_lines() if "deploy-rollout.sh" in x])
@@ -725,7 +725,7 @@ class ReviewRound3Tests(Base):
         self.assertEqual(r.select(["TELEGRAM_BOT_TOKEN"], None), ["TELEGRAM_BOT_TOKEN"])
 
     def test_empty_prompt_is_a_skip_not_an_error(self) -> None:
-        rot = self.make(prompts=["", "  "])
+        rot = self.make(prompts=["", "  "], files=[r.TELEGRAM_CONFIRM_PHRASE])
         self.assertEqual(rot.stage(["STRIPE_SECRET_KEY", "TELEGRAM_BOT_TOKEN"]), 0)
         self.assertIn("skipped STRIPE_SECRET_KEY", "\n".join(self.out))
         self.assertEqual(self.env("STRIPE_SECRET_KEY"), "sk_old")
@@ -807,12 +807,85 @@ class RollScriptTests(unittest.TestCase):
         self.assertNotIn("rollout", log)
 
 
+class ReviewRound4Tests(Base):
+    # 1. Telegram is forward-only
+    def stage_telegram(self, **kw) -> r.Rotator:
+        return self.make(prompts=["tg-NEW"], files=[r.TELEGRAM_CONFIRM_PHRASE], **kw)
+
+    def test_telegram_needs_the_typed_confirmation(self) -> None:
+        rot = self.make(prompts=["tg-NEW"], files=["yes"])
+        self.assertEqual(rot.stage(["TELEGRAM_BOT_TOKEN"]), 1)
+        self.assertEqual(self.env("TELEGRAM_BOT_TOKEN"), "tg-old")
+        self.assertFalse([c for c in self.runner.calls if "deploy-rollout.sh" in " ".join(c.argv)])
+
+    def test_failed_verify_keeps_the_new_token_and_prints_recovery(self) -> None:
+        rot = self.stage_telegram(fail=lambda line: line.endswith("manage.py check") or "exec -T telegram" in line,
+                                  )
+        # the telegram service is verified through compose ps; force an unhealthy answer
+        real = self.runner.run
+        self.runner.run = lambda argv, **kw: (SimpleNamespace(returncode=0, stdout="[]", stderr="")
+                                              if argv[:4] == ["docker", "compose", "ps", "--format"]
+                                              else real(argv, **kw))
+        self.assertEqual(rot.stage(["TELEGRAM_BOT_TOKEN"]), 1)
+        self.assertEqual(self.env("TELEGRAM_BOT_TOKEN"), "tg-NEW")  # the old token is revoked: never restored
+        text = "\n".join(self.out)
+        self.assertIn("deploy-rollout.sh roll telegram", text)
+        self.assertIn("NOT rolled back", text)
+        self.assertEqual(rot.step_of("TELEGRAM_BOT_TOKEN"), "staged")
+        self.assertNotIn("tg-NEW", text)
+
+    def test_telegram_rollback_is_refused(self) -> None:
+        rot = self.stage_telegram()
+        self.assertEqual(rot.stage(["TELEGRAM_BOT_TOKEN"]), 0)
+        with self.assertRaises(r.RotationError) as cm:
+            rot.rollback("TELEGRAM_BOT_TOKEN")
+        self.assertIn("BotFather", str(cm.exception))
+        self.assertEqual(self.env("TELEGRAM_BOT_TOKEN"), "tg-NEW")
+
+    def test_telegram_is_refused_in_batch(self) -> None:
+        with self.assertRaises(r.RotationError):
+            self.stage_telegram().stage(["TELEGRAM_BOT_TOKEN"], batch=True)
+
+    # 2. bundles and unset members
+    def test_bundle_with_a_required_member_unset_changes_nothing(self) -> None:
+        (self.tmp / ".env").write_text(ENV + "AWS_ACCESS_KEY_ID=akid_old\nAWS_SECRET_ACCESS_KEY=\n")
+        rot = self.make(prompts=["akid_new", "aws_new"])
+        self.assertEqual(rot.stage(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]), 0)
+        self.assertEqual(self.env("AWS_ACCESS_KEY_ID"), "akid_old")
+        self.assertIn("skipped bundle aws: AWS_SECRET_ACCESS_KEY is unset, nothing was changed", "\n".join(self.out))
+        self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
+
+    def test_apple_wallet_password_is_optional(self) -> None:
+        (self.tmp / ".env").write_text(ENV + "APPLE_WALLET_CERT_PATH=/app/certs/c0.pem\n"
+                                       "APPLE_WALLET_KEY_PATH=/app/certs/k0.pem\nAPPLE_WALLET_KEY_PASSWORD=\n")
+        for n in ("c1.pem", "k1.pem"):
+            (self.tmp / "certs" / n).write_text("x")
+            os.chmod(self.tmp / "certs" / n, 0o644)
+        rot = self.make(files=["/app/certs/c1.pem", "/app/certs/k1.pem"])
+        names = ["APPLE_WALLET_CERT_PATH", "APPLE_WALLET_KEY_PATH", "APPLE_WALLET_KEY_PASSWORD"]
+        self.assertEqual(rot.stage(names), 0)
+        self.assertEqual(self.env("APPLE_WALLET_CERT_PATH"), "/app/certs/c1.pem")
+        self.assertEqual(self.env("APPLE_WALLET_KEY_PATH"), "/app/certs/k1.pem")
+        self.assertEqual(self.env("APPLE_WALLET_KEY_PASSWORD"), "")
+
+    # 3. finalize of an idle name
+    def test_finalize_of_idle_names_is_a_noted_noop_in_a_multi_name_call(self) -> None:
+        rot = self.make(prompts=["sk_new"])
+        rot.stage(["STRIPE_SECRET_KEY"])
+        self.assertEqual(rot.finalize(["OIDC_SIGNING_KEY_PATH", "STRIPE_SECRET_KEY"], archive=False), 0)
+        self.assertIn("[OIDC_SIGNING_KEY_PATH] not staged", "\n".join(self.out))
+        self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "finalized")
+
+    def test_finalize_of_a_single_idle_name_is_still_an_error(self) -> None:
+        self.assertEqual(self.make().finalize(["OIDC_SIGNING_KEY_PATH"], archive=False), 1)
+
+
 class NoValueLeakTests(Base):
     def test_values_never_reach_argv_logs_stdout_or_state(self) -> None:
         (self.tmp / ".env").write_text(ENV + "ROTATION_AGE_RECIPIENT=age1abc\n")
         os.chmod(self.tmp / "certs" / "oidc.pem", 0o644)
         rot = self.make(prompts=["sk_NEW_stripe", "whsec_NEW", "tg-NEW"], maintenance=True,
-                        files=[r.DB_CONFIRM_PHRASE])
+                        files=[r.TELEGRAM_CONFIRM_PHRASE, r.DB_CONFIRM_PHRASE])
         logged: list[str] = []
         real = self.runner.run
         self.runner.run = lambda argv, **kw: (logged.append(" ".join(argv)), real(argv, **kw))[1]

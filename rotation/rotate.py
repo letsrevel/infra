@@ -34,6 +34,7 @@ import manifest as mf  # noqa: E402
 
 MANIFEST = mf.MANIFEST
 DB_CONFIRM_PHRASE = "ROTATE DB PASSWORD"
+TELEGRAM_CONFIRM_PHRASE = "TELEGRAM REVOKED"
 SECRET_LOOKING = re.compile(r"SECRET|TOKEN|KEY|PASSWORD|WEBHOOK_URL")
 # Structured (structlog JSON) level, or an uppercase level word in a plain line. Never a bare "error".
 ERROR_LINE = re.compile(r'(?i:"level"\s*:\s*"(?:error|critical)")|\b(?:ERROR|CRITICAL)\b')
@@ -400,6 +401,11 @@ class Rotator:
                           {"old_count": len(old), "new_count": len(new)})
         if k == mf.THIRD_PARTY:
             self.out(s.instructions)
+            if not s.reversible:
+                self.out(f"{s.name} CANNOT be rolled back: the provider revokes the old value at once.")
+                if self.prompt(f"Type '{TELEGRAM_CONFIRM_PHRASE}' once you have revoked the old token: ") \
+                        != TELEGRAM_CONFIRM_PHRASE:
+                    raise RotationError("confirmation phrase mismatch, aborted")
             val = self.prompt_secret(f"New value for {s.name} (hidden, empty = skip): ")
             if not val.strip():
                 self.out(f"skipped {s.name}")
@@ -486,6 +492,8 @@ class Rotator:
         if "DB_PASSWORD" in names and (len(names) > 1 or batch):
             raise RotationError("DB_PASSWORD is staged alone (no other secrets, no --batch): "
                                 "ALTER ROLE, recreate pgbouncer/postgres-exporter, roll the app")
+        if batch and any(not MANIFEST[n].reversible for n in names):
+            raise RotationError("forward-only secrets (TELEGRAM_BOT_TOKEN) are staged by name, without --batch")
         failures = 0
         if any(MANIFEST[n].kind == mf.GENERATED_WITH_FALLBACK for n in names):
             self.require_fallback_support()
@@ -526,6 +534,10 @@ class Rotator:
         """Stage one secret or one bundle with a single backup and a single roll."""
         env = self.env_text()
         plans: list[tuple[mf.Secret, Staged]] = []
+        for s in secs:  # a bundle is all or nothing: a required member that is unset skips the lot
+            if len(secs) > 1 and not s.optional and not get_env(env, s.name):
+                self.out(f"skipped bundle {s.bundle}: {s.name} is unset, nothing was changed")
+                return []
         for s in secs:
             if not get_env(env, s.name) and s.kind != mf.LIST_APPEND:
                 self.out(f"[{s.name}] unset: nothing to rotate, skipped")
@@ -632,6 +644,14 @@ class Rotator:
             ok = self.verify(sorted({x for _, p in plans for x in p.services}, key=_svc_order) + recreate, now)
         except RotationError as e:
             self.out(f"ERROR: {e}")
+        if not ok and any(not s.reversible for s, _ in plans):
+            names = ", ".join(s.name for s, _ in plans if not s.reversible)
+            svcs = " ".join(services)
+            self.out(f"verification failed. {names} was NOT rolled back: the old value is already revoked at the "
+                     "provider, so .env keeps the new one.")
+            self.out(f"Recover by hand: check the value in .env is the one the provider issued, then run "
+                     f"`./deploy-rollout.sh roll {svcs}` and `rotate.py verify`.")
+            raise RotationError("verification failed; forward-only secret kept (see recovery steps above)")
         if not ok:
             self.out("verification failed: rolling back")
             for s, _ in plans:
@@ -645,6 +665,10 @@ class Rotator:
         entry = self.load_state()["secrets"].get(name, {})
         next_step(entry.get("step", "idle"), "rollback")
         s = MANIFEST[name]
+        if not s.reversible:
+            raise RotationError(f"{name} cannot be rolled back: the old value was revoked at the provider "
+                                "(BotFather /revoke). Fix forward: re-issue a token, put it in .env, "
+                                f"`./deploy-rollout.sh roll {' '.join(s.services)}`")
         fallback = s.kind == mf.GENERATED_WITH_FALLBACK
         if fallback and entry.get("phase") == 1 and entry.get("ever_primary"):
             raise RotationError("the new key has been primary: it stays in the fallbacks. Re-run `stage` to "
@@ -748,6 +772,9 @@ class Rotator:
         failures = 0
         recipient = self.archive_preflight() if archive else ""
         for name in names:
+            if len(names) > 1 and self.step_of(name) in ("idle", "finalized"):
+                self.out(f"[{name}] not staged (step {self.step_of(name)}): nothing to finalize")
+                continue
             try:
                 self._finalize_one(name, force, recipient)
             except RotationError as e:

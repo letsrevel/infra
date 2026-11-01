@@ -31,6 +31,8 @@ class Secret:
     fallback_var: str | None = None  # *_FALLBACKS / *_INACTIVE_PATHS companion variable
     extra_vars: tuple[str, ...] = ()  # other managed variables (not rotated themselves)
     migrate: bool = False  # needs `rotate_encrypted_fields` between stage and finalize
+    reversible: bool = True  # False: the provider kills the old value at once, so a rollback cannot work
+    optional: bool = False  # bundle member that may legitimately be unset
     bundle: str | None = None  # paired credentials: staged atomically, in one roll (see BUNDLES)
 
     @property
@@ -146,7 +148,16 @@ _BUNDLE_OF = {n: b for b, names in BUNDLES.items() for n in names}
 # Never part of a --group: ordering matters (Telegram goes last, BotFather revokes the old token instantly).
 BY_NAME_ONLY = frozenset({"TELEGRAM_BOT_TOKEN"})
 
-MANIFEST: dict[str, Secret] = {s.name: replace(s, bundle=_BUNDLE_OF.get(s.name)) for s in _SECRETS}
+# BotFather /revoke invalidates the old token the moment the operator does it.
+NON_REVERSIBLE = frozenset({"TELEGRAM_BOT_TOKEN"})
+# A key without a password is legitimate.
+OPTIONAL_MEMBERS = frozenset({"APPLE_WALLET_KEY_PASSWORD"})
+
+MANIFEST: dict[str, Secret] = {
+    s.name: replace(s, bundle=_BUNDLE_OF.get(s.name), reversible=s.name not in NON_REVERSIBLE,
+                    optional=s.name in OPTIONAL_MEMBERS)
+    for s in _SECRETS
+}
 
 # Keys that look secret but are not (or are managed outside the tool).
 EXEMPT_NAMES = frozenset({

@@ -38,7 +38,7 @@ ssh -t revel 'cd infra && ./rotation/rotate.py status'
 | `migrate` | `rotate_encrypted_fields`, then `rotate_encrypted_fields --verify`, for staged `SECRET_KEY` / `SALT_KEY`. |
 | `verify` | Health, API, frontend, `manage.py check`, error-line budget (below). |
 | `finalize <name...> [--force] [--no-archive]` | After the grace window. Order: trial-encrypt to the recipient, **archive the retired values with `age`**, then edit `.env`, roll, verify, then delete the run's `.env.bak.*` (and, for OIDC, the retired PEM, only if it was archived and sits inside `certs/`). An archive failure leaves `.env`, the state and the backups untouched. If verify fails after the edit, the old values are restored, the plaintext copy is deleted and the roll is repeated; if that roll fails too the tool says the services are out of sync and prints the command to re-roll. |
-| `rollback <name...>` | Restore the secret's previous values from its backup (only while `staged`). See the rollback rule below. A bundle is rolled back as a whole: name every member or the bundle (`rollback aws`). |
+| `rollback <name...>` | Restore the secret's previous values from its backup (only while `staged`). See the rollback rule below; `TELEGRAM_BOT_TOKEN` is forward-only and `rollback` refuses it. A bundle is rolled back as a whole: name every member or the bundle (`rollback aws`). |
 
 Groups: `self` = `SECRET_KEY`, `SALT_KEY`, OIDC key, Grafana password. `thirdparty` = everything
 rolled in a provider console, plus `STRIPE_WEBHOOK_SECRETS`, except `TELEGRAM_BOT_TOKEN`. `DB_PASSWORD` and
@@ -70,12 +70,20 @@ manually or after a failed verify, makes the old key primary again and KEEPS the
 Credentials that only work as a set are staged atomically, with one backup and one roll, and
 rolled back together: `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (`aws`), and
 `APPLE_WALLET_CERT_PATH` + `APPLE_WALLET_KEY_PATH` + `APPLE_WALLET_KEY_PASSWORD` (`apple_wallet`).
-Naming only some members is an error that names the bundle. Members that are unset are skipped.
+Naming only some members is an error that names the bundle. If a required member is unset in `.env` the whole bundle is skipped (`skipped bundle <name>: <member> is unset, nothing was changed`); only optional members (`APPLE_WALLET_KEY_PASSWORD`, a key may have no password) may be unset.
 
 States per secret: `idle -> staged -> (migrated) -> finalized`, and `staged -> idle` on rollback.
 `SECRET_KEY` and `SALT_KEY` cannot finalize before `migrate` (not even with `--force`).
 One-shot secrets (a Stripe key, a token) sit in `staged` until you `finalize` them, which archives
 the old value and deletes the plaintext `.env.bak.*`; do this once the old credential is revoked.
+
+### Forward-only: `TELEGRAM_BOT_TOKEN`
+
+BotFather `/revoke` kills the old token the moment you do it, so the old value cannot be restored.
+`stage TELEGRAM_BOT_TOKEN` (by name, never in a group or `--batch`) asks you to type
+`TELEGRAM REVOKED` once you have revoked, then for the new token. If `verify` fails, the new token is
+KEPT in `.env` and the tool prints the recovery steps (check the token, then
+`./deploy-rollout.sh roll telegram` and `rotate.py verify`). `rollback TELEGRAM_BOT_TOKEN` is refused.
 
 ### Verify
 
@@ -120,11 +128,14 @@ so the grace windows overlap.
    Google OAuth secrets, GCP service-account key, Cloudflare token, LLM / Hugging Face / IP2Location
    keys, Pushover, Discord, IndexNow, Eventbrite; not Telegram). At each hidden prompt paste the new
    value, or press Enter to skip that secret (its console step is not done yet). One `--batch` rolls once.
-4. `rotate.py stage TELEGRAM_BOT_TOKEN` last, by name (it is in no group): BotFather `/revoke` kills the old token instantly; only `telegram` restarts.
+4. `rotate.py stage TELEGRAM_BOT_TOKEN` last, by name (it is in no group). It is NOT reversible: revoke in BotFather first, then type `TELEGRAM REVOKED` and paste the new token. A failed verify keeps the new token and prints manual recovery steps. Only `telegram` restarts.
 5. `DB_PASSWORD` (below), in its window.
 6. `rotate.py stage OIDC_SIGNING_KEY_PATH`. Skipped automatically when unset.
-7. After the grace windows: `rotate.py finalize SECRET_KEY SALT_KEY OIDC_SIGNING_KEY_PATH STRIPE_WEBHOOK_SECRETS`, then
-   `finalize` the one-shot secrets once their old credentials are revoked. Let the old Stripe keys expire.
+7. After the grace windows, run `rotate.py status` and finalize only the names it shows as `staged` or
+   `migrated` (secrets skipped earlier are `idle`): for example `rotate.py finalize SECRET_KEY SALT_KEY
+   OIDC_SIGNING_KEY_PATH STRIPE_WEBHOOK_SECRETS`, then the one-shot secrets once their old credentials are
+   revoked. In a multi-name `finalize`, a name that is `idle` or already `finalized` is a noted no-op; a
+   single idle name is an error. Let the old Stripe keys expire.
 8. `rotate.py check`, `rotate.py status`. Done. Calendar a reminder for the next round (and the Apple Wallet certificate expiry).
 
 Rotate `GRAFANA_ADMIN_PASSWORD` any time: `rotate.py stage GRAFANA_ADMIN_PASSWORD` resets it with
