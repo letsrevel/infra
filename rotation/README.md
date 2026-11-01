@@ -34,14 +34,15 @@ ssh -t revel 'cd infra && ./rotation/rotate.py status'
 | `plan` | Per secret: kind, set/unset, step, grace end, services that get rolled. |
 | `status` | Same without the services column. |
 | `check [--example PATH]` | Drift check. Fails (exit 1) on any key matching `SECRET\|TOKEN\|KEY\|PASSWORD\|WEBHOOK_URL` in `.env.example` (commented ones included) or the live `.env` that is not in the manifest. Lists manifest secrets that are not set in `.env`. Runs in CI against `.env.example`. |
-| `stage <name...>` / `stage --group self\|thirdparty\|all` | Back up `.env` (`.env.bak.<ts>`, 0600), edit only the target lines, record the step, roll the affected services, `verify`. A failed verify restores that secret and rolls again. `--batch` rolls and verifies once for the whole invocation (rolls everything back on failure); it does not apply to `SECRET_KEY` / `SALT_KEY`, which always roll twice. Unset secrets are skipped. Paired credentials are bundles (below). `DB_PASSWORD` is refused in `--batch` and next to any other secret. |
+| `stage <name...>` / `stage --group self\|thirdparty\|all` | Back up `.env` (`.env.bak.<ts>`, 0600), edit only the target lines, record the step, roll the affected services, `verify`. A failed verify restores that secret and rolls again. `--batch` rolls and verifies once for the whole invocation (rolls everything back on failure); it does not apply to `SECRET_KEY` / `SALT_KEY`, which always roll twice. Unset secrets are skipped, except `STRIPE_WEBHOOK_SECRETS` (a list), which is staged even when unset: it is seeded from the legacy `STRIPE_WEBHOOK_SECRET` so no endpoint loses its secret before the grace period. Pressing Enter at a hidden prompt skips that secret (`skipped <NAME>`, not an error; for a bundle, the whole bundle). Paired credentials are bundles (below). `DB_PASSWORD` is refused in `--batch` and next to any other secret. |
 | `migrate` | `rotate_encrypted_fields`, then `rotate_encrypted_fields --verify`, for staged `SECRET_KEY` / `SALT_KEY`. |
 | `verify` | Health, API, frontend, `manage.py check`, error-line budget (below). |
 | `finalize <name...> [--force] [--no-archive]` | After the grace window. Order: trial-encrypt to the recipient, **archive the retired values with `age`**, then edit `.env`, roll, verify, then delete the run's `.env.bak.*` (and, for OIDC, the retired PEM, only if it was archived and sits inside `certs/`). An archive failure leaves `.env`, the state and the backups untouched. If verify fails after the edit, the old values are restored, the plaintext copy is deleted and the roll is repeated; if that roll fails too the tool says the services are out of sync and prints the command to re-roll. |
-| `rollback <name>` | Restore the secret's previous values from its backup (only while `staged`). See the rollback rule below. |
+| `rollback <name...>` | Restore the secret's previous values from its backup (only while `staged`). See the rollback rule below. A bundle is rolled back as a whole: name every member or the bundle (`rollback aws`). |
 
 Groups: `self` = `SECRET_KEY`, `SALT_KEY`, OIDC key, Grafana password. `thirdparty` = everything
-rolled in a provider console, plus `STRIPE_WEBHOOK_SECRETS`. `DB_PASSWORD` is in no group.
+rolled in a provider console, plus `STRIPE_WEBHOOK_SECRETS`, except `TELEGRAM_BOT_TOKEN`. `DB_PASSWORD` and
+`TELEGRAM_BOT_TOKEN` are in no group: they are staged by name only.
 
 ### Two-phase stage for `SECRET_KEY` / `SALT_KEY`
 
@@ -84,7 +85,7 @@ Each probe prints PASS/FAIL, never a value:
 2. `GET /api/version` inside `web` (compose publishes no host ports, so probes run in the containers).
 3. Frontend `GET /` inside the `frontend` container (same check as its healthcheck).
 4. `docker compose exec -T web python manage.py check` exits 0; the warning IDs it prints are shown, and `oauth.W002` (unreadable OIDC key) fails.
-5. Lines at ERROR/CRITICAL in `docker compose logs --since <rollout start> web celery_default` stay under 5 (`verify --error-threshold N`).
+5. Lines at ERROR/CRITICAL in `docker compose logs --since <rollout start> web celery_default` at most 5 (`verify --error-threshold N`, inclusive).
 6. Advisory: `curl -fsS https://$API_DOMAIN/api/version` from the host.
 
 ## Grace windows and why
@@ -117,8 +118,9 @@ so the grace windows overlap.
 3. Third parties, in parallel with the windows running: follow each secret's printed console steps.
    `rotate.py stage --group thirdparty --batch` (Stripe key and webhook secrets, Brevo SMTP key,
    Google OAuth secrets, GCP service-account key, Cloudflare token, LLM / Hugging Face / IP2Location
-   keys, Pushover, Discord, IndexNow, Eventbrite). Stage names whose console step is done; one `--batch` rolls once.
-4. `rotate.py stage TELEGRAM_BOT_TOKEN` last: BotFather `/revoke` kills the old token instantly; only `telegram` restarts.
+   keys, Pushover, Discord, IndexNow, Eventbrite; not Telegram). At each hidden prompt paste the new
+   value, or press Enter to skip that secret (its console step is not done yet). One `--batch` rolls once.
+4. `rotate.py stage TELEGRAM_BOT_TOKEN` last, by name (it is in no group): BotFather `/revoke` kills the old token instantly; only `telegram` restarts.
 5. `DB_PASSWORD` (below), in its window.
 6. `rotate.py stage OIDC_SIGNING_KEY_PATH`. Skipped automatically when unset.
 7. After the grace windows: `rotate.py finalize SECRET_KEY SALT_KEY OIDC_SIGNING_KEY_PATH STRIPE_WEBHOOK_SECRETS`, then
@@ -163,6 +165,13 @@ retired values are in `rotation/archive/*.age`.
 Each `finalize` writes its own age file (`<UTC date>.age`, or `<date>-<time>-<name>.age` when that exists):
 age streams cannot be concatenated, so nothing is appended. Archived OIDC keys appear as
 `OIDC_SIGNING_KEY_FILE:<path>=<base64 PEM>`. Back the archive up off the host.
+
+## Warning: do not re-run `setup.sh` on a rotated install
+
+`setup.sh` regenerates `SECRET_KEY` and `SALT_KEY` and rewrites `.env` (the old file is kept as a
+backup). On an install that has been rotated that discards the current keys, the fallbacks and the
+unsubscribe pin, and makes encrypted columns unreadable. Restore the needed values from that backup
+or from the `age` archive instead of re-running the wizard.
 
 ## Tests
 

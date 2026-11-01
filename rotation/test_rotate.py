@@ -361,8 +361,8 @@ class StateMachineTests(Base):
         self.assertFalse([x for x in self.runner.argv_lines() if "deploy-rollout.sh" in x])
 
     def test_third_party_rejects_empty_and_file_needs_644(self) -> None:
-        rot = self.make(prompts=["   "])
-        self.assertEqual(rot.stage(["STRIPE_SECRET_KEY"]), 1)
+        rot = self.make(prompts=["x\ny"])
+        self.assertEqual(rot.stage(["STRIPE_SECRET_KEY"]), 1)  # a newline in a value is an error
         self.assertEqual(self.env("STRIPE_SECRET_KEY"), "sk_old")
         (self.tmp / ".env").write_text("GOOGLE_WALLET_SERVICE_ACCOUNT_KEY_PATH=/app/certs/a.json\n")
         (self.tmp / "certs" / "b.json").write_text("{}")
@@ -687,6 +687,124 @@ class ScramTests(unittest.TestCase):
         self.assertNotEqual(a, b)
         self.assertNotIn("s3cret-pw", a)
         self.assertRegex(a, r"^SCRAM-SHA-256\$4096:[A-Za-z0-9+/=]{24}\$[A-Za-z0-9+/=]{44}:[A-Za-z0-9+/=]{44}$")
+
+
+class ReviewRound3Tests(Base):
+    # 0. the new value reaches .env before the live credential changes
+    def test_env_write_failure_means_the_live_hook_never_runs(self) -> None:
+        real = r.write_atomic
+
+        def failing(path, text):
+            if Path(path).name == ".env":
+                raise OSError("disk full")
+            return real(path, text)
+
+        for name, kw in (("DB_PASSWORD", dict(maintenance=True, files=[r.DB_CONFIRM_PHRASE])),
+                         ("GRAFANA_ADMIN_PASSWORD", {})):
+            rot = self.make(**kw)
+            before = (self.tmp / ".env").read_text()
+            with mock.patch.object(r, "write_atomic", failing), self.assertRaises(OSError):
+                rot.stage([name])
+            self.assertFalse([c for c in self.runner.calls if "psql" in c.argv or "reset-admin-password" in c.argv])
+            self.assertEqual((self.tmp / ".env").read_text(), before)
+            self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
+
+    def test_hook_failure_restores_env(self) -> None:
+        for name, kw, marker in (("DB_PASSWORD", dict(maintenance=True, files=[r.DB_CONFIRM_PHRASE]), "psql"),
+                                 ("GRAFANA_ADMIN_PASSWORD", {}, "reset-admin-password")):
+            rot = self.make(fail=lambda line, m=marker: m in line, **kw)
+            before = (self.tmp / ".env").read_text()
+            self.assertEqual(rot.stage([name]), 1)
+            self.assertEqual((self.tmp / ".env").read_text(), before)
+            self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
+
+    # 1. telegram by name only; empty input is a skip
+    def test_telegram_is_not_in_the_thirdparty_group(self) -> None:
+        self.assertNotIn("TELEGRAM_BOT_TOKEN", r.select([], "thirdparty"))
+        self.assertNotIn("TELEGRAM_BOT_TOKEN", r.select([], "all"))
+        self.assertEqual(r.select(["TELEGRAM_BOT_TOKEN"], None), ["TELEGRAM_BOT_TOKEN"])
+
+    def test_empty_prompt_is_a_skip_not_an_error(self) -> None:
+        rot = self.make(prompts=["", "  "])
+        self.assertEqual(rot.stage(["STRIPE_SECRET_KEY", "TELEGRAM_BOT_TOKEN"]), 0)
+        self.assertIn("skipped STRIPE_SECRET_KEY", "\n".join(self.out))
+        self.assertEqual(self.env("STRIPE_SECRET_KEY"), "sk_old")
+        self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "idle")
+        self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
+
+    def test_empty_prompt_skips_a_whole_bundle(self) -> None:
+        (self.tmp / ".env").write_text(ENV + "AWS_ACCESS_KEY_ID=akid_old\nAWS_SECRET_ACCESS_KEY=aws_old\n")
+        rot = self.make(prompts=["akid_new", ""])
+        self.assertEqual(rot.stage(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]), 0)
+        self.assertEqual((self.env("AWS_ACCESS_KEY_ID"), self.env("AWS_SECRET_ACCESS_KEY")), ("akid_old", "aws_old"))
+
+    # 2. rollback of bundles
+    def test_bundle_rollback_by_member_names_and_by_bundle_name(self) -> None:
+        for names in (["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"], ["aws"]):
+            (self.tmp / ".env").write_text(ENV + "AWS_ACCESS_KEY_ID=akid_old\nAWS_SECRET_ACCESS_KEY=aws_old\n")
+            for f in self.tmp.glob(".env.bak.*"):
+                f.unlink()
+            (self.tmp / "rotation" / "state.json").unlink(missing_ok=True)
+            rot = self.make(prompts=["akid_new", "aws_new"])
+            rot.stage(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"])
+            self.assertEqual(r.main(["--dir", str(self.tmp), "rollback", *names], rotator=rot), 0)
+            self.assertEqual((self.env("AWS_ACCESS_KEY_ID"), self.env("AWS_SECRET_ACCESS_KEY")),
+                             ("akid_old", "aws_old"))
+            self.assertEqual(rot.step_of("AWS_ACCESS_KEY_ID"), "idle")
+            self.assertEqual(rot.step_of("AWS_SECRET_ACCESS_KEY"), "idle")
+            self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
+
+    def test_rollback_of_half_a_bundle_is_refused(self) -> None:
+        self.assertEqual(r.main(["--dir", str(self.tmp), "rollback", "AWS_ACCESS_KEY_ID"], rotator=self.make()), 1)
+
+    # 3. a missing retired PEM only fails its own secret
+    def test_missing_retired_pem_does_not_abort_other_secrets(self) -> None:
+        rot = self.make(prompts=["sk_new"])
+        rot.stage(["OIDC_SIGNING_KEY_PATH", "STRIPE_SECRET_KEY"])
+        (self.tmp / "certs" / "oidc.pem").unlink()
+        self.advance(days=31)
+        self.assertEqual(rot.finalize(["OIDC_SIGNING_KEY_PATH", "STRIPE_SECRET_KEY"], archive=False), 1)
+        self.assertEqual(rot.step_of("OIDC_SIGNING_KEY_PATH"), "staged")
+        self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "finalized")
+
+    # 8. the recreated DB services are verified
+    def test_db_rotation_verifies_pgbouncer_and_exporter(self) -> None:
+        rot = self.make(maintenance=True, files=[r.DB_CONFIRM_PHRASE])
+        rot.stage(["DB_PASSWORD"])
+        ps = [c.argv for c in self.runner.calls if c.argv[:4] == ["docker", "compose", "ps", "--format"]]
+        self.assertTrue(any("pgbouncer" in a and "postgres-exporter" in a for a in ps))
+
+
+class RollScriptTests(unittest.TestCase):
+    def run_roll(self, *services: str):
+        import subprocess
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        stub = tmp / "docker"
+        stub.write_text('#!/bin/sh\necho "$*" >> "$LOG"\ncase "$*" in\n'
+                        '"compose --profile * config --services") printf "web\\ncelery_default\\ntelegram\\n" ;;\n'
+                        '"compose config --services") printf "web\\ncelery_default\\n" ;;\nesac\n')
+        stub.chmod(0o755)
+        script = Path(__file__).resolve().parent.parent / "deploy-rollout.sh"
+        env = dict(os.environ, PATH=f"{tmp}:{os.environ['PATH']}", LOG=str(tmp / "log"))
+        res = subprocess.run(["bash", str(script), "roll", *services], env=env, capture_output=True, text=True)
+        log = (tmp / "log").read_text() if (tmp / "log").exists() else ""
+        return res, log
+
+    @unittest.skipUnless(shutil.which("bash"), "bash needed")
+    def test_inactive_profile_is_skipped_with_a_note(self) -> None:
+        res, log = self.run_roll("web", "telegram")
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("telegram", res.stdout)
+        self.assertIn("rollout -t 120 web", log)
+        self.assertNotIn("force-recreate telegram", log)
+
+    @unittest.skipUnless(shutil.which("bash"), "bash needed")
+    def test_unknown_service_is_an_error_and_nothing_is_rolled(self) -> None:
+        res, log = self.run_roll("web", "celery_defualt")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("celery_defualt", res.stdout + res.stderr)
+        self.assertNotIn("rollout", log)
 
 
 class NoValueLeakTests(Base):

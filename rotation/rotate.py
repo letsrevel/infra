@@ -387,7 +387,10 @@ class Rotator:
                           list(s.services), {"new_key_file": str(host_new), "retired_paths": [old]}, before=make_key)
         if k == mf.LIST_APPEND:
             self.out(s.instructions)
-            new = csv_split(self.prompt_secret(f"New {s.name} value(s), comma-separated (hidden): "))
+            new = csv_split(self.prompt_secret(f"New {s.name} value(s), comma-separated (hidden, empty = skip): "))
+            if not new:
+                self.out(f"skipped {s.name}")
+                return None
             old = csv_split(cur(s.name))
             if not old and cur("STRIPE_WEBHOOK_SECRET"):  # legacy single secret: keep it valid through the grace period
                 old = [cur("STRIPE_WEBHOOK_SECRET") or ""]
@@ -397,13 +400,19 @@ class Rotator:
                           {"old_count": len(old), "new_count": len(new)})
         if k == mf.THIRD_PARTY:
             self.out(s.instructions)
-            val = self.prompt_secret(f"New value for {s.name} (hidden): ")
-            if not val.strip() or re.search(r"[\r\n\x00]", val):
-                raise RotationError("value is empty or contains a newline")
+            val = self.prompt_secret(f"New value for {s.name} (hidden, empty = skip): ")
+            if not val.strip():
+                self.out(f"skipped {s.name}")
+                return None
+            if re.search(r"[\r\n\x00]", val):
+                raise RotationError("value contains a newline")
             return Staged({s.name: val.strip()}, [s.name], list(s.services))
         if k == mf.THIRD_PARTY_FILE:
             self.out(s.instructions)
-            path = self.prompt(f"Container path of the new file for {s.name}: ").strip()
+            path = self.prompt(f"Container path of the new file for {s.name} (empty = skip): ").strip()
+            if not path:
+                self.out(f"skipped {s.name}")
+                return None
             host = self.host_path(path)
             if not host.is_file():
                 raise RotationError(f"{host} does not exist")
@@ -524,6 +533,9 @@ class Rotator:
             self.out(f"[{s.name}] staging ({s.kind})")
             plan = self.prepare(s, env)
             if plan is None:
+                if len(secs) > 1:  # a bundle is all or nothing
+                    self.out(f"skipped bundle {s.bundle}: nothing was changed")
+                    return []
                 self.out(f"[{s.name}] not configured, skipped")
                 continue
             plans.append((s, plan))
@@ -574,16 +586,25 @@ class Rotator:
 
     def _commit(self, plans: list[tuple[mf.Secret, Staged]], roll: bool, resume: bool = False) -> None:
         env, now = self.env_text(), self.now()
+        original = env
         backup = backup_file(self.env_path, now)
         try:
-            for _, p in plans:
-                if p.before:
-                    p.before()
+            # The new value reaches .env FIRST (the backup stays); only then does a live credential change,
+            # so a failed write can never leave the database/Grafana ahead of .env.
             for _, p in plans:
                 for var, val in p.edits.items():
                     env = set_env(env, var, val)
             write_atomic(self.env_path, env)
+            for _, p in plans:
+                if p.before:
+                    p.before()
         except BaseException:
+            try:
+                if self.env_path.read_text(encoding="utf-8") != original:
+                    write_atomic(self.env_path, original)
+            except OSError:
+                self.out(f"WARNING: could not restore .env; the previous one is kept in {backup.name}")
+                raise
             backup.unlink(missing_ok=True)
             for _, p in plans:
                 if "new_key_file" in p.extra:
@@ -608,7 +629,7 @@ class Rotator:
         ok = False
         try:
             self.roll(services, recreate)
-            ok = self.verify(sorted({x for _, p in plans for x in p.services}, key=_svc_order), now)
+            ok = self.verify(sorted({x for _, p in plans for x in p.services}, key=_svc_order) + recreate, now)
         except RotationError as e:
             self.out(f"ERROR: {e}")
         if not ok:
@@ -647,7 +668,7 @@ class Rotator:
         try:
             if entry.get("roll", True):
                 self.roll(list(s.services), entry.get("recreate"))
-            self.verify(list(s.services), started)
+            self.verify(list(s.services) + list(entry.get("recreate") or []), started)
         except RotationError as e:
             self.out(f"[{name}] WARNING: re-roll after rollback failed: {e}")
         if fallback and entry.get("phase") == 2:
@@ -753,7 +774,10 @@ class Rotator:
         elif s.kind == mf.GENERATED_FILE_WITH_INACTIVE:
             key_files = entry["retired_paths"]
             for p in key_files:
-                data = self.confined_key_path(p).read_bytes()
+                try:
+                    data = self.confined_key_path(p).read_bytes()
+                except OSError as e:
+                    raise RotationError(f"retired key {p} cannot be read ({e.strerror}): nothing was changed") from None
                 retired.append(f"OIDC_SIGNING_KEY_FILE:{p}={base64.b64encode(data).decode()}")
             edits = {s.fallback_var: ",".join(csv_drop(csv_split(get_env(env, s.fallback_var)), key_files))}
         elif s.kind == mf.LIST_APPEND:
@@ -864,7 +888,8 @@ def select(names: list[str], group: str | None) -> list[str]:
             raise RotationError(f"unknown secret {n} (see `plan`)")
     if group:
         groups = {"self": ("self",), "thirdparty": ("thirdparty",), "all": ("self", "thirdparty")}
-        names = names + [n for n, s in MANIFEST.items() if s.group in groups[group] and n not in names]
+        names = names + [n for n, s in MANIFEST.items() if s.group in groups[group] and n not in names
+                                 and n not in mf.BY_NAME_ONLY]
     for n in names:
         bundle = MANIFEST[n].bundle
         if bundle and not set(mf.BUNDLES[bundle]) <= set(names):
@@ -894,7 +919,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true", help="finalize before the grace window ends")
     p.add_argument("--no-archive", action="store_true", help="do not archive retired values (they are lost)")
     p = sub.add_parser("rollback")
-    p.add_argument("name")
+    p.add_argument("names", nargs="+", help="secret names; a bundle name (aws, apple_wallet) expands to its members")
     return ap
 
 
@@ -928,8 +953,9 @@ def main(argv: list[str] | None = None, rotator: Rotator | None = None) -> int:
             return 1 if rotator.finalize(select(args.names, None), force=args.force,
                                          archive=not args.no_archive) else 0
         elif args.cmd == "rollback":
-            select([args.name], None)
-            rotator.rollback(args.name)
+            names = select([m for n in args.names for m in mf.BUNDLES.get(n, (n,))], None)
+            for n in names:
+                rotator.rollback(n)
     except RotationError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

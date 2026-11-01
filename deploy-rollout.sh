@@ -139,10 +139,22 @@ roll() {
         case " ${order[*]} " in *" $svc "*) ;; *) svcs+=("$svc") ;; esac
     done
 
+    # A name that is not defined at all is a typo: fail before rolling anything.
+    # One that is defined but sits in an inactive profile is skipped with a note.
+    local defined bad=0
+    defined=$(docker compose --profile '*' config --services)
+    for svc in "${svcs[@]}"; do
+        if ! grep -qx "$svc" <<<"$defined"; then
+            echo -e "${RED}Unknown service: $svc (not defined in docker-compose.yml).${NC}" >&2
+            bad=1
+        fi
+    done
+    [ "$bad" -eq 0 ] || return 1
+
     active=$(docker compose config --services)
     for svc in "${svcs[@]}"; do
         if ! grep -qx "$svc" <<<"$active"; then
-            echo -e "${YELLOW}Skipping $svc (not in the active compose profiles).${NC}"
+            echo -e "${YELLOW}Skipping $svc (defined, but not in the active compose profiles).${NC}"
             continue
         fi
         case "$svc" in
