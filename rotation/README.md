@@ -167,11 +167,14 @@ recreate it. Do not run that casually afterwards; use `deploy-rollout.sh deploy`
 Columns in an old dump are encrypted under the `SECRET_KEY` x `SALT_KEY` of that time, and the
 retired values are in `rotation/archive/*.age`.
 
-1. `age -d -i <your identity> rotation/archive/<date>.age` and find the `SECRET_KEY=` / `SALT_KEY=` lines for the epoch of the backup.
+1. Decrypt to a private file, never to the terminal (scrollback and session logs keep it):
+   `umask 077; age -d -i <your identity> -o /tmp/revel-archive.env rotation/archive/<date>.age`, and take the
+   `SECRET_KEY=` / `SALT_KEY=` lines for the epoch of the backup from that file (`grep -c` to check, an editor to copy).
 2. Restore the dump.
 3. Put the retired values into `SECRET_KEY_FALLBACKS` / `SALT_KEY_FALLBACKS` in `.env` (comma-separated, no spaces) and roll: `./deploy-rollout.sh roll web celery_default beat telegram`.
 4. `docker compose exec -T web python manage.py rotate_encrypted_fields`, then `... --verify`.
 5. Empty the two `*_FALLBACKS` variables again and roll.
+6. Delete the decrypted file: `shred -u /tmp/revel-archive.env` (or `rm -P` on macOS).
 
 Each `finalize` writes its own age file (`<UTC date>.age`, or `<date>-<time>-<name>.age` when that exists):
 age streams cannot be concatenated, so nothing is appended. Archived OIDC keys appear as
