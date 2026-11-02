@@ -299,7 +299,9 @@ class Rotator:
 
     def roll(self, services: list[str], recreate: list[str] | None = None) -> None:
         for svc in self.filter_active(recreate or []):
-            self.compose("up", "-d", "--no-deps", "--force-recreate", svc)
+            r = self.compose("up", "-d", "--no-deps", "--force-recreate", svc)
+            if r.returncode != 0:
+                raise RotationError(f"force-recreate {svc} failed (exit {r.returncode})")
         services = self.filter_active(services)
         if not services:
             return

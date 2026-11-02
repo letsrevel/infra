@@ -353,6 +353,12 @@ class StateMachineTests(Base):
         self.assertIn("ALTER ROLE \"revel\" PASSWORD 'SCRAM-SHA-256$4096:", sql)
         self.assertNotIn(self.env("DB_PASSWORD"), sql)  # only the verifier leaves the host
 
+    def test_failed_force_recreate_fails_the_db_roll(self) -> None:
+        rot = self.make(maintenance=True, files=[r.DB_CONFIRM_PHRASE],
+                        fail=lambda line: "--force-recreate pgbouncer" in line)
+        self.assertEqual(rot.stage(["DB_PASSWORD"]), 1)
+        self.assertFalse([x for x in self.runner.argv_lines() if "deploy-rollout.sh" in x])  # no rollout ran
+
     def test_grafana_resets_via_stdin_and_does_not_roll(self) -> None:
         rot = self.make()
         rot.stage(["GRAFANA_ADMIN_PASSWORD"])
