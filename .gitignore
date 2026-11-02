@@ -22,3 +22,8 @@ certs/*
 # Docker volumes
 *.log
 .idea/
+# Secret rotation (local state, archives of retired secrets, env backups)
+rotation/state.json
+rotation/archive/
+.env.bak.*
+__pycache__/
