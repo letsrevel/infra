@@ -644,6 +644,26 @@ class StageGuardTests(Base):
         self.make(prompts=["whsec_new"]).stage(["STRIPE_WEBHOOK_SECRETS"])
         self.assertEqual(self.env("STRIPE_WEBHOOK_SECRETS"), "whsec_legacy,whsec_new")
 
+    def test_legacy_stripe_secret_is_refused(self) -> None:
+        text = "STRIPE_WEBHOOK_SECRETS=\nSTRIPE_WEBHOOK_SECRET=whsec_legacy\n"
+        (self.tmp / ".env").write_text(text)
+        rot = self.make(prompts=["whsec_new"])
+        with self.assertRaises(r.RotationError) as cm:
+            rot.stage(["STRIPE_WEBHOOK_SECRET"])
+        self.assertIn("STRIPE_WEBHOOK_SECRETS", str(cm.exception))
+        self.assertEqual((self.tmp / ".env").read_text(), text)
+        self.assertEqual(rot.load_state()["secrets"], {})
+        self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
+
+    def test_groups_never_select_legacy_stripe_secret(self) -> None:
+        for g in ("thirdparty", "all"):
+            names = r.select([], g)
+            self.assertNotIn("STRIPE_WEBHOOK_SECRET", names)
+            self.assertIn("STRIPE_WEBHOOK_SECRETS", names)
+
+    def test_plan_shows_legacy_stripe_secret_as_rolled_via_the_list(self) -> None:
+        self.assertIn("via STRIPE_WEBHOOK_SECRETS", [row[1] for row in self.make().rows() if row[0] == "STRIPE_WEBHOOK_SECRET"])
+
 
 class RunnerTests(Base):
     def test_stderr_is_printed_on_failure(self) -> None:

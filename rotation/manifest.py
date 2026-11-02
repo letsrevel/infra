@@ -77,7 +77,8 @@ _SECRETS: tuple[Secret, ...] = (
     _tp("STRIPE_SECRET_KEY", WEB_CELERY,
         "Stripe dashboard -> Developers -> API keys -> Roll key, expiry on the old key (up to 7 days)."),
     _tp("STRIPE_WEBHOOK_SECRET", WEB_CELERY,
-        "Legacy single webhook secret (STRIPE_WEBHOOK_SECRETS takes precedence). Roll it as for the list."),
+        "Legacy single webhook secret, not rotated directly: roll STRIPE_WEBHOOK_SECRETS instead (it is seeded "
+        "from this value and keeps it valid through the grace period)."),
     _tp("EMAIL_HOST_PASSWORD", WEB_CELERY,
         "Brevo -> SMTP & API -> SMTP -> generate a new SMTP key (several can coexist). Paste it here."),
     _tp("EMAIL_WEBHOOK_SECRET", ("web",),
@@ -146,7 +147,11 @@ BUNDLES: dict[str, tuple[str, ...]] = {
 _BUNDLE_OF = {n: b for b, names in BUNDLES.items() for n in names}
 
 # Never part of a --group: ordering matters (Telegram goes last, BotFather revokes the old token instantly).
-BY_NAME_ONLY = frozenset({"TELEGRAM_BOT_TOKEN"})
+# The legacy Stripe secret is never staged at all (see NOT_DIRECTLY_ROTATABLE), so it is excluded here too.
+BY_NAME_ONLY = frozenset({"TELEGRAM_BOT_TOKEN", "STRIPE_WEBHOOK_SECRET"})
+
+# Name -> the secret to roll instead. Staging these directly would swap the value with no grace period.
+NOT_DIRECTLY_ROTATABLE = {"STRIPE_WEBHOOK_SECRET": "STRIPE_WEBHOOK_SECRETS"}
 
 # BotFather /revoke invalidates the old token the moment the operator does it.
 NON_REVERSIBLE = frozenset({"TELEGRAM_BOT_TOKEN"})

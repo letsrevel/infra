@@ -489,6 +489,12 @@ class Rotator:
 
     def stage(self, names: list[str], batch: bool = False) -> int:
         """Stage each secret; returns the number of failures."""
+        for n in names:
+            if n in mf.NOT_DIRECTLY_ROTATABLE:
+                raise RotationError(
+                    f"{n} is not rotated directly (the old value would stop working at once): roll "
+                    f"{mf.NOT_DIRECTLY_ROTATABLE[n]} instead. It is seeded from {n} and keeps it valid "
+                    f"for the grace period; once it is finalized {n} is unused.")
         if "DB_PASSWORD" in names and (len(names) > 1 or batch):
             raise RotationError("DB_PASSWORD is staged alone (no other secrets, no --batch): "
                                 "ALTER ROLE, recreate pgbouncer/postgres-exporter, roll the app")
@@ -909,7 +915,8 @@ class Rotator:
         rows: list[tuple[str, ...]] = []
         for n, s in MANIFEST.items():
             e = state.get(n, {})
-            rows.append((n, s.kind, "set" if get_env(env, n) else "unset", e.get("step", "idle") + (f" (phase {e['phase']})" if e.get("phase") else ""),
+            kind = f"via {mf.NOT_DIRECTLY_ROTATABLE[n]}" if n in mf.NOT_DIRECTLY_ROTATABLE else s.kind
+            rows.append((n, kind, "set" if get_env(env, n) else "unset", e.get("step", "idle") + (f" (phase {e['phase']})" if e.get("phase") else ""),
                          (e.get("grace_end") or "-")[:19]))
         return rows
 
