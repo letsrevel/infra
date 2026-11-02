@@ -531,7 +531,7 @@ class Rotator:
                         self.rollback(n, reason="batch verify failed")
                     except RotationError as e:
                         self.out(f"[{n}] ERROR: {e}")
-                        self.out(f"[{n}] stays staged: fix the cause, then run `rollback {n}`")
+                        self.out(f"[{n}] stays staged: fix the cause, then run `rollback {retry_name(n)}`")
                         failures += 1
         return failures
 
@@ -668,7 +668,7 @@ class Rotator:
                     stuck.append(s.name)
             if stuck:
                 raise RotationError(f"verification failed and the rollback of {', '.join(stuck)} did not complete: "
-                                    f"they stay staged, re-run `rollback {' '.join(stuck)}`")
+                                    f"they stay staged, re-run `rollback {' '.join(dict.fromkeys(retry_name(n) for n in stuck))}`")
             raise RotationError("verification failed, rolled back")
 
     # ---- rollback
@@ -703,7 +703,7 @@ class Rotator:
             raise RotationError(
                 f"{name}: the live credential is still the NEW one, and .env, the state and the running "
                 f"services were left unchanged (they match it). Fix the service, then re-run "
-                f"`rollback {name}`") from None
+                f"`rollback {retry_name(name)}`") from None
         write_atomic(self.env_path, env)
         started = self.now()
         try:
@@ -717,7 +717,7 @@ class Rotator:
             self.out(f"[{name}] ERROR: re-roll after rollback failed: {e}")
             raise RotationError(
                 f"{name}: .env holds the OLD value but the services may still run the NEW one, and the state "
-                f"stays staged with its backup. Re-run `rollback {name}` once the rollout works") from None
+                f"stays staged with its backup. Re-run `rollback {retry_name(name)}` once the rollout works") from None
         if entry.get("new_key_file"):
             Path(entry["new_key_file"]).unlink(missing_ok=True)
         if not self.verify(list(s.services) + list(entry.get("recreate") or []), started):
@@ -788,7 +788,11 @@ class Rotator:
         else:
             raise RotationError("could not create a unique archive file")
         text = f"# retired {stamp.isoformat()} {name}\n" + "\n".join(lines) + "\n"
-        r = self.runner.run(["age", "-r", recipient], input_text=text, stdout_path=path)
+        try:
+            r = self.runner.run(["age", "-r", recipient], input_text=text, stdout_path=path)
+        except BaseException:  # an interrupted run must not leave a zero-byte .age behind
+            path.unlink(missing_ok=True)
+            raise
         if r.returncode != 0:
             path.unlink(missing_ok=True)
             raise RotationError("age failed: retired values were NOT archived; nothing was changed")
@@ -951,6 +955,11 @@ def check_drift(example_texts: list[str], env_text: str | None) -> tuple[list[st
 
 
 # --------------------------------------------------------------------------- CLI
+def retry_name(name: str) -> str:
+    """What the operator types to retry a rollback: the bundle for a bundle member, else the secret."""
+    return MANIFEST[name].bundle or name
+
+
 def select(names: list[str], group: str | None) -> list[str]:
     for n in names:
         if n not in MANIFEST:
@@ -1024,7 +1033,12 @@ def main(argv: list[str] | None = None, rotator: Rotator | None = None) -> int:
         elif args.cmd == "rollback":
             names = select([m for n in args.names for m in mf.BUNDLES.get(n, (n,))], None)
             failed = 0
+            steps = {n: rotator.step_of(n) for n in names}
             for n in names:  # keep going: a stuck member must not strand the rest of a bundle
+                bundle = MANIFEST[n].bundle
+                if bundle and steps[n] == "idle" and any(steps[m] != "idle" for m in mf.BUNDLES[bundle]):
+                    rotator.out(f"[{n}] already rolled back, skipping")  # retry of a partially rolled-back bundle
+                    continue
                 try:
                     rotator.rollback(n)
                 except RotationError as e:

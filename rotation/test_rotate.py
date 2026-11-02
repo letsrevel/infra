@@ -1001,6 +1001,46 @@ class ReviewRound5Tests(Base):
         self.assertEqual((self.env("AWS_ACCESS_KEY_ID"), self.env("AWS_SECRET_ACCESS_KEY")), ("akid_old", "aws_old"))
         self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
 
+    def _half_rolled_back_aws(self):
+        (self.tmp / ".env").write_text(ENV + "AWS_ACCESS_KEY_ID=akid_old\nAWS_SECRET_ACCESS_KEY=aws_old\n")
+        seen = {"on": False, "n": 0}
+
+        def fail(line: str) -> bool:
+            if seen["on"] and "deploy-rollout.sh" in line:
+                seen["n"] += 1
+                return seen["n"] == 1  # only the first member's recovery roll fails
+            return False
+
+        rot = self.make(prompts=["akid_new", "aws_new"], fail=fail)
+        rot.stage(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"])
+        seen["on"] = True
+        return rot
+
+    def test_retrying_a_bundle_skips_members_already_rolled_back(self) -> None:
+        rot = self._half_rolled_back_aws()
+        cli = ["--dir", str(self.tmp), "rollback", "aws"]
+        self.assertEqual(r.main(cli, rotator=rot), 1)
+        self.assertEqual(rot.step_of("AWS_ACCESS_KEY_ID"), "staged")
+        self.assertEqual(rot.step_of("AWS_SECRET_ACCESS_KEY"), "idle")
+        self.assertEqual(r.main(cli, rotator=rot), 0)
+        self.assertTrue(any("[AWS_SECRET_ACCESS_KEY] already rolled back, skipping" in o for o in self.out))
+        self.assertEqual(rot.step_of("AWS_ACCESS_KEY_ID"), "idle")
+        self.assertEqual(self.env("AWS_ACCESS_KEY_ID"), "akid_old")
+
+    def test_rollback_of_an_all_idle_bundle_is_still_refused(self) -> None:
+        rot = self._half_rolled_back_aws()
+        r.main(["--dir", str(self.tmp), "rollback", "aws"], rotator=rot)
+        r.main(["--dir", str(self.tmp), "rollback", "aws"], rotator=rot)
+        self.assertEqual(r.main(["--dir", str(self.tmp), "rollback", "aws"], rotator=rot), 1)
+
+    def test_retry_hint_names_the_bundle_not_the_member(self) -> None:
+        self.assertEqual(r.retry_name("AWS_SECRET_ACCESS_KEY"), "aws")
+        self.assertEqual(r.retry_name("STRIPE_SECRET_KEY"), "STRIPE_SECRET_KEY")
+        rot = self._half_rolled_back_aws()
+        with self.assertRaises(r.RotationError) as cm:
+            rot.rollback("AWS_ACCESS_KEY_ID")
+        self.assertIn("`rollback aws`", str(cm.exception))
+
     def test_failed_env_write_in_finalize_leaves_no_plaintext_backup(self) -> None:
         rot = self.make()
         rot.stage(["SALT_KEY"])
@@ -1018,6 +1058,17 @@ class ReviewRound5Tests(Base):
         self.assertEqual(len(set(paths)), 3)
         for p in paths:
             self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o600)
+
+    def test_interrupted_archive_leaves_no_file(self) -> None:
+        rot = self.make()
+
+        def boom(*_a, **_k):
+            raise KeyboardInterrupt
+
+        self.runner.run = boom
+        with self.assertRaises(KeyboardInterrupt):
+            rot.archive("age1abc", "SALT_KEY", ["SALT_KEY=v"])
+        self.assertEqual(list((self.tmp / "rotation" / "archive").glob("*")), [])
 
     def test_runner_writes_a_fresh_file_not_an_appended_stream(self) -> None:
         out = self.tmp / "o.bin"
