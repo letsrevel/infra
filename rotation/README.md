@@ -187,12 +187,15 @@ retired values are in `rotation/archive/*.age`.
    `SECRET_KEY` / `SALT_KEY` found is added (an old dump decrypts under any of them) and values already in a
    `*_FALLBACKS` variable are kept. The secrets never reach the terminal: the archives are decrypted into a fresh
    `mktemp -d` directory (mode 0700) that the subshell deletes on exit, and only counts are printed. If no key is
-   found, `.env` is left unchanged and the step fails.
+   found, `.env` is left unchanged and the step fails. Each archive is encrypted to the `ROTATION_AGE_RECIPIENT` set
+   when it was written, so pass the identity for **every** recipient ever used (repeat `-i`, or one identity file
+   holding them all); otherwise the loop stops at the first archive it cannot decrypt. Keep retired identities as
+   long as their archives exist.
 
    ```sh
    ( d=$(mktemp -d) && trap 'rm -rf "$d"' EXIT || exit 1
      for f in rotation/archive/*.age; do  # or your narrowed list
-       age -d -i <your identity> -o "$d/$(basename "$f").env" "$f" || exit 1
+       age -d -i <identity> [-i <older identity> ...] -o "$d/$(basename "$f").env" "$f" || exit 1
      done
      python3 - "$d"/*.env <<'PY'
    import sys
