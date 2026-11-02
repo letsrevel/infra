@@ -207,6 +207,8 @@ class Runner:
 
 # --------------------------------------------------------------------------- state machine
 TRANSITIONS = {
+    # "pending" is the write-ahead journal: a command recorded it, then died before reaching "staged".
+    "pending": {"rollback": "idle"},
     "idle": {"stage": "staged"},
     "finalized": {"stage": "staged"},
     "staged": {"migrate": "migrated", "finalize": "finalized", "rollback": "idle"},
@@ -476,6 +478,14 @@ class Rotator:
             return  # a previous run stopped after phase 1: resume with the promotion
         next_step(entry.get("step", "idle"), "stage")
 
+    def refuse_if_interrupted(self) -> None:
+        """A `pending` entry means a command was killed mid-change: only `rollback` may touch anything."""
+        names = [n for n, e in self.load_state()["secrets"].items() if e.get("step") == "pending"]
+        if names:
+            retry = " ".join(dict.fromkeys(retry_name(n) for n in names))
+            raise RotationError(f"a previous command was interrupted while changing {', '.join(names)}: "
+                                f"run `rollback {retry}` first")
+
     @staticmethod
     def _units(names: list[str]) -> list[list[str]]:
         """Group names into atomic stage units: a bundle is one unit, anything else stands alone."""
@@ -491,6 +501,7 @@ class Rotator:
 
     def stage(self, names: list[str], batch: bool = False) -> int:
         """Stage each secret; returns the number of failures."""
+        self.refuse_if_interrupted()
         for n in names:
             if n in mf.NOT_DIRECTLY_ROTATABLE:
                 raise RotationError(
@@ -613,7 +624,22 @@ class Rotator:
         env, now = self.env_text(), self.now()
         original = env
         backup = backup_file(self.env_path, now)
+        # Write-ahead journal: the entries are recorded as "pending" BEFORE .env or a live credential changes,
+        # so a hard kill (SIGKILL, power loss, ssh drop) in between leaves a state that `rollback` can undo.
+        state = self.load_state()
+        previous = {s.name: state["secrets"].get(s.name) for s, _ in plans}
+        for s, p in plans:
+            old = state["secrets"].get(s.name, {}) if resume else {}
+            extra = dict(p.extra, **({"b1": backup.name} if p.extra.get("phase") == 1 else {}))
+            entry = dict(old)
+            entry.update(
+                step="pending", kind=s.kind, staged_at=now.isoformat(), backup=backup.name,
+                backups=old.get("backups", []) + [backup.name], vars=p.touched, recreate=p.recreate, roll=p.roll,
+                grace_end=(now + s.grace).isoformat() if s.grace and p.extra.get("phase", 2) == 2 else None,
+                updated_at=now.isoformat(), **extra)
+            state["secrets"][s.name] = entry
         try:
+            self.save_state(state)
             # The new value reaches .env FIRST (the backup stays); only then does a live credential change,
             # so a failed write can never leave the database/Grafana ahead of .env.
             for _, p in plans:
@@ -623,30 +649,30 @@ class Rotator:
             for _, p in plans:
                 if p.before:
                     p.before()
+            state = self.load_state()
+            for s, _ in plans:
+                state["secrets"][s.name]["step"] = "staged"
+            self.save_state(state)
         except BaseException:
             try:
                 if self.env_path.read_text(encoding="utf-8") != original:
                     write_atomic(self.env_path, original)
             except OSError:
-                self.out(f"WARNING: could not restore .env; the previous one is kept in {backup.name}")
+                self.out(f"WARNING: could not restore .env; the previous one is kept in {backup.name}; "
+                         f"the state stays pending: run `rollback`")
                 raise
             backup.unlink(missing_ok=True)
             for _, p in plans:
                 if "new_key_file" in p.extra:
                     Path(p.extra["new_key_file"]).unlink(missing_ok=True)
+            state = self.load_state()
+            for name, prev in previous.items():  # back to exactly what the command found
+                if prev is None:
+                    state["secrets"].pop(name, None)
+                else:
+                    state["secrets"][name] = prev
+            self.save_state(state)
             raise
-        state = self.load_state()
-        for s, p in plans:
-            old = state["secrets"].get(s.name, {}) if resume else {}
-            extra = dict(p.extra, **({"b1": backup.name} if p.extra.get("phase") == 1 else {}))
-            entry = dict(old)
-            entry.update(
-                step="staged", kind=s.kind, staged_at=now.isoformat(), backup=backup.name,
-                backups=old.get("backups", []) + [backup.name], vars=p.touched, recreate=p.recreate, roll=p.roll,
-                grace_end=(now + s.grace).isoformat() if s.grace and p.extra.get("phase", 2) == 2 else None,
-                updated_at=now.isoformat(), **extra)
-            state["secrets"][s.name] = entry
-        self.save_state(state)
         if not roll:
             return
         services = sorted({x for _, p in plans if p.roll for x in p.services}, key=_svc_order)
@@ -732,7 +758,8 @@ class Rotator:
             self.out(f"[{name}] WARNING: verification after rollback failed: check `rotate.py verify`")
         if fallback and entry.get("phase") == 2:
             # Back to "introduced": old key primary, new key kept; its backup stays until finalize.
-            self.update_state(name, phase=1, backup=entry["b1"], vars=[s.fallback_var], grace_end=None)
+            self.update_state(name, step="staged", phase=1, backup=entry["b1"], vars=[s.fallback_var],
+                              grace_end=None)
             self.out(f"[{name}] rolled back to phase 1 ({reason}); the new key stays in {s.fallback_var}")
             return
         self.update_state(name, step="idle", backups=[], rolled_back_reason=reason)
@@ -742,13 +769,14 @@ class Rotator:
     def _unlink_unreferenced(self, files: list[str]) -> None:
         """Delete env backups no live (staged/migrated) secret still points at (bundles share one)."""
         live = {b for e in self.load_state()["secrets"].values()
-                if e.get("step") in ("staged", "migrated") for b in e.get("backups", [])}
+                if e.get("step") in ("pending", "staged", "migrated") for b in e.get("backups", [])}
         for f in files:
             if f not in live:
                 (self.base / f).unlink(missing_ok=True)
 
     # ---- migrate
     def migrate(self) -> None:
+        self.refuse_if_interrupted()
         staged = {n: e for n, e in self.load_state()["secrets"].items()
                   if e.get("step") == "staged" and MANIFEST[n].migrate}
         if not staged:
@@ -819,6 +847,7 @@ class Rotator:
 
     def finalize(self, names: list[str], force: bool = False, archive: bool = True) -> int:
         """Finalize each secret; returns the number of failures."""
+        self.refuse_if_interrupted()
         failures = 0
         recipient = self.archive_preflight() if archive else ""
         for name in names:
@@ -918,7 +947,10 @@ class Rotator:
         for n, s in MANIFEST.items():
             e = state.get(n, {})
             kind = f"via {mf.NOT_DIRECTLY_ROTATABLE[n]}" if n in mf.NOT_DIRECTLY_ROTATABLE else s.kind
-            rows.append((n, kind, "set" if get_env(env, n) else "unset", e.get("step", "idle") + (f" (phase {e['phase']})" if e.get("phase") else ""),
+            step = e.get("step", "idle")
+            step = "pending (interrupted: run rollback)" if step == "pending" else \
+                step + (f" (phase {e['phase']})" if e.get("phase") else "")
+            rows.append((n, kind, "set" if get_env(env, n) else "unset", step,
                          (e.get("grace_end") or "-")[:19]))
         return rows
 

@@ -1104,6 +1104,133 @@ class ReviewRound5Tests(Base):
         self.assertEqual(out.read_bytes(), b"new")
 
 
+class PendingJournalTests(Base):
+    """Write-ahead journal: a hard kill between the .env write and the "staged" record leaves "pending"."""
+
+    def interrupt(self, rot: r.Rotator, *names: str) -> None:
+        """The on-disk state a SIGKILL leaves: everything done, the journal entries still "pending"."""
+        state = rot.load_state()
+        for n in names:
+            state["secrets"][n]["step"] = "pending"
+        rot.save_state(state)
+
+    def test_state_is_pending_when_env_is_written_and_staged_afterwards(self) -> None:
+        rot = self.make(prompts=["sk_new"])
+        seen: list[str] = []
+        real = r.write_atomic
+
+        def spy(path, text):
+            if path == rot.env_path:
+                seen.append(rot.step_of("STRIPE_SECRET_KEY"))
+            real(path, text)
+
+        with mock.patch.object(r, "write_atomic", spy):
+            rot.stage(["STRIPE_SECRET_KEY"])
+        self.assertEqual(seen, ["pending"])
+        self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "staged")
+
+    def test_pending_is_recorded_before_the_live_credential_changes(self) -> None:
+        steps: list[str] = []
+        rot = self.make(maintenance=True, files=[r.DB_CONFIRM_PHRASE],
+                        fail_call=lambda c: bool(steps.append(rot.step_of("DB_PASSWORD")) if "psql" in c.argv else 0))
+        rot.stage(["DB_PASSWORD"])
+        self.assertEqual(steps, ["pending"])
+
+    def test_interrupted_third_party_stage_is_rolled_back(self) -> None:
+        rot = self.make(prompts=["sk_new"])
+        rot.stage(["STRIPE_SECRET_KEY"])
+        self.interrupt(rot, "STRIPE_SECRET_KEY")
+        rot = self.make()
+        for call in (lambda: rot.stage(["TELEGRAM_BOT_TOKEN"]), lambda: rot.stage(["STRIPE_SECRET_KEY"]),
+                     rot.migrate, lambda: rot.finalize(["STRIPE_SECRET_KEY"], archive=False)):
+            with self.assertRaisesRegex(r.RotationError, "interrupted while changing STRIPE_SECRET_KEY: "
+                                                          "run `rollback STRIPE_SECRET_KEY` first"):
+                call()
+        self.assertIn("pending (interrupted: run rollback)", "\n".join(self.out_after(rot.status)))
+        rot.rollback("STRIPE_SECRET_KEY")
+        self.assertEqual(self.env("STRIPE_SECRET_KEY"), "sk_old")
+        self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "idle")
+        self.assertFalse(list(self.tmp.glob(".env.bak.*")))
+
+    def out_after(self, fn) -> list[str]:
+        self.out.clear()
+        fn()
+        return list(self.out)
+
+    def test_interrupted_phase2_promotion_restores_the_old_primary(self) -> None:
+        rot = self.make()
+        rot.stage(["SALT_KEY"])
+        new = r.get_env((self.tmp / ".env").read_text(), "SALT_KEY")
+        self.interrupt(rot, "SALT_KEY")
+        with self.assertRaisesRegex(r.RotationError, "rollback SALT_KEY"):
+            rot.stage(["STRIPE_SECRET_KEY"])
+        b1 = rot.load_state()["secrets"]["SALT_KEY"]["b1"]
+        rot.rollback("SALT_KEY")
+        self.assertEqual(self.env("SALT_KEY"), "oldsalt+/=")
+        self.assertEqual(self.env("SALT_KEY_FALLBACKS"), new)  # the promoted key is kept, never lost
+        entry = rot.load_state()["secrets"]["SALT_KEY"]
+        self.assertEqual((entry["step"], entry["phase"], entry["backup"]), ("staged", 1, b1))
+        self.assertTrue((self.tmp / b1).exists())
+
+    def test_interrupted_db_password_rotation_resets_the_role(self) -> None:
+        rot = self.make(maintenance=True, files=[r.DB_CONFIRM_PHRASE])
+        rot.stage(["DB_PASSWORD"])
+        self.interrupt(rot, "DB_PASSWORD")
+        rot = self.make()
+        with self.assertRaisesRegex(r.RotationError, "rollback DB_PASSWORD"):
+            rot.migrate()
+        rot.rollback("DB_PASSWORD")
+        self.assertEqual(self.env("DB_PASSWORD"), "olddbpass")
+        alter = [c for c in self.runner.calls if "psql" in c.argv]
+        self.assertEqual(len(alter), 1)  # ALTER ROLE back to the old password
+        self.assertIn("ALTER ROLE \"revel\" PASSWORD 'SCRAM-SHA-256$", alter[0].input)
+        self.assertEqual(rot.step_of("DB_PASSWORD"), "idle")
+
+    def test_kill_before_the_env_write_is_a_harmless_rollback(self) -> None:
+        rot = self.make(prompts=["sk_new"])
+        rot.stage(["STRIPE_SECRET_KEY"])
+        backup = rot.load_state()["secrets"]["STRIPE_SECRET_KEY"]["backup"]
+        (self.tmp / ".env").write_text((self.tmp / backup).read_text())  # the write never happened
+        self.interrupt(rot, "STRIPE_SECRET_KEY")
+        rot = self.make()
+        rot.rollback("STRIPE_SECRET_KEY")
+        self.assertEqual((self.tmp / ".env").read_text(), ENV)
+        self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "idle")
+
+    def test_bundle_members_share_a_backup_that_survives_the_first_rollback(self) -> None:
+        bundle = next(iter(mf.BUNDLES))
+        members = list(mf.BUNDLES[bundle])
+        rot = self.make()
+        state = rot.load_state()
+        (self.tmp / "bk").write_text(ENV)
+        for n in members:
+            state["secrets"][n] = {"step": "pending", "backup": "bk", "backups": ["bk"], "vars": [], "roll": False}
+        rot.save_state(state)
+        rot.rollback(members[0])
+        self.assertTrue((self.tmp / "bk").exists())  # the pending siblings still reference it
+
+    def test_in_process_failure_in_before_leaves_no_pending_entry(self) -> None:
+        rot = self.make(maintenance=True, files=[r.DB_CONFIRM_PHRASE], fail=lambda line: "psql" in line)
+        self.assertEqual(rot.stage(["DB_PASSWORD"]), 1)
+        self.assertNotIn("DB_PASSWORD", rot.load_state()["secrets"])
+        self.assertEqual((self.tmp / ".env").read_text(), ENV)
+        self.assertFalse(list(self.tmp.glob(".env.bak.*")))
+
+    def test_in_process_failure_restores_the_previous_entry(self) -> None:
+        rot = self.make(on_roll=lambda _l: None)
+        rot.stage(["SALT_KEY"])
+        state = rot.load_state()
+        state["secrets"]["SALT_KEY"].update(step="staged", phase=1)
+        rot.save_state(state)
+        before = rot.load_state()["secrets"]["SALT_KEY"]
+        rot = self.make(fail=lambda line: "manage.py help" in line)
+        # resumed promotion whose .env write blows up: the phase-1 entry must come back untouched
+        with mock.patch.object(r, "set_env", side_effect=OSError("boom")), self.assertRaises(OSError):
+            rot._commit([(mf.MANIFEST["SALT_KEY"], r.Staged({"SALT_KEY": "x"}, ["SALT_KEY"], [], {"phase": 2}))],
+                        True, resume=True)
+        self.assertEqual(rot.load_state()["secrets"]["SALT_KEY"], before)
+
+
 class ManifestTests(unittest.TestCase):
     def test_every_entry_is_well_formed(self) -> None:
         kinds = {mf.GENERATED_WITH_FALLBACK, mf.GENERATED_FILE_WITH_INACTIVE, mf.LIST_APPEND, mf.THIRD_PARTY,

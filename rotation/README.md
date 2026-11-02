@@ -77,6 +77,17 @@ OIDC key file), so re-run `rollback <name>` once the rollout works. Every step i
 to the old value, `.env` rewritten from the same backup, roll). A bundle is rolled back member by member and a
 failing member does not stop the others; re-run `rollback <bundle>` (e.g. `rollback aws`): members already rolled back (`idle`) are skipped with `already rolled back, skipping`, and the stuck ones are retried. Naming only some members is refused, as for `stage`.
 
+### Interrupted commands (write-ahead journal)
+
+Before `stage` touches `.env` or a live credential (`ALTER ROLE`, Grafana reset) it records the secret as
+`pending` in `state.json` (backup name and touched variables included), and flips it to `staged` once the
+change is done. A hard kill in between (SIGKILL, power loss, ssh drop) therefore leaves the secret `pending`
+with its `.env.bak.*` kept; `status` shows `pending (interrupted: run rollback)`. Until it is cleared,
+`stage`, `migrate` and `finalize` refuse to run; `verify` and `check` still work. Run `rollback <name>`
+(`rollback <bundle>` for a bundle member): it restores the old values from the backup and is safe whether or
+not the `.env` write or the credential change happened. A phase-2 `SECRET_KEY` / `SALT_KEY` promotion goes
+back to phase 1 with the new key kept in the fallbacks, as for any rollback of phase 2.
+
 ### Bundles
 
 Credentials that only work as a set are staged atomically, with one backup and one roll, and
