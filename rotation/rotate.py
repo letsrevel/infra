@@ -230,7 +230,7 @@ class Staged:
     services: list[str]
     extra: dict[str, Any] = field(default_factory=dict)  # json-safe, no values
     recreate: list[str] = field(default_factory=list)
-    before: Callable[[], None] | None = None  # side effect run after the backup, before the env write
+    before: Callable[[], None] | None = None  # side effect run after the backup and the .env write (".env first")
     roll: bool = True
 
 
@@ -506,8 +506,9 @@ class Rotator:
             if n in mf.NOT_DIRECTLY_ROTATABLE:
                 raise RotationError(
                     f"{n} is not rotated directly (the old value would stop working at once): roll "
-                    f"{mf.NOT_DIRECTLY_ROTATABLE[n]} instead. It is seeded from {n} and keeps it valid "
-                    f"for the grace period; once it is finalized {n} is unused.")
+                    f"{mf.NOT_DIRECTLY_ROTATABLE[n]} instead. It is seeded from {n} only when its list is "
+                    f"empty and keeps it valid for the grace period; `finalize` drops the old list items but leaves "
+                    f"the {n} line in .env (unused while the list is set; remove it by hand if you like).")
         if "DB_PASSWORD" in names and (len(names) > 1 or batch):
             raise RotationError("DB_PASSWORD is staged alone (no other secrets, no --batch): "
                                 "ALTER ROLE, recreate pgbouncer/postgres-exporter, roll the app")
@@ -550,7 +551,7 @@ class Rotator:
                         self.rollback(n, reason="batch verify failed")
                     except RotationError as e:
                         self.out(f"[{n}] ERROR: {e}")
-                        self.out(f"[{n}] stays staged: fix the cause, then run `rollback {retry_name(n)}`")
+                        self.out(f"[{n}] stays staged (or pending): fix the cause, then run `rollback {retry_name(n)}`")
                         failures += 1
         return failures
 
@@ -672,17 +673,23 @@ class Rotator:
                 self.out(f"WARNING: could not restore .env; the previous one is kept in {backup.name}; "
                          f"the state stays pending: run `rollback`")
                 raise
+            try:
+                state = self.load_state()
+                for name, prev in previous.items():  # back to exactly what the command found
+                    if prev is None:
+                        state["secrets"].pop(name, None)
+                    else:
+                        state["secrets"][name] = prev
+                self.save_state(state)
+            except BaseException:
+                # Keep the backup (and the new key file): the journal is still pending and `rollback` needs them.
+                self.out(f"WARNING: .env was restored but the state could not be: it stays pending and its "
+                         f"backup {backup.name} is kept; run `rollback` to finish")
+                raise
             backup.unlink(missing_ok=True)
             for _, p in plans:
                 if "new_key_file" in p.extra:
                     Path(p.extra["new_key_file"]).unlink(missing_ok=True)
-            state = self.load_state()
-            for name, prev in previous.items():  # back to exactly what the command found
-                if prev is None:
-                    state["secrets"].pop(name, None)
-                else:
-                    state["secrets"][name] = prev
-            self.save_state(state)
             raise
         if not roll:
             return
@@ -713,7 +720,7 @@ class Rotator:
                     stuck.append(s.name)
             if stuck:
                 raise RotationError(f"verification failed and the rollback of {', '.join(stuck)} did not complete: "
-                                    f"they stay staged, re-run `rollback {' '.join(dict.fromkeys(retry_name(n) for n in stuck))}`")
+                                    f"they stay staged (or pending), re-run `rollback {' '.join(dict.fromkeys(retry_name(n) for n in stuck))}`")
             raise RotationError("verification failed, rolled back")
 
     # ---- rollback
@@ -723,6 +730,9 @@ class Rotator:
         entry = self.load_state()["secrets"].get(name, {})
         next_step(entry.get("step", "idle"), "rollback")
         s = MANIFEST[name]
+        if not s.reversible and entry.get("step") == "pending":
+            self._resolve_pending_forward_only(name, s, entry)
+            return
         if not s.reversible:
             raise RotationError(f"{name} cannot be rolled back: the old value was revoked at the provider "
                                 "(BotFather /revoke). Fix forward: re-issue a token, put it in .env, "
@@ -743,7 +753,7 @@ class Rotator:
                 self._grafana_reset(old_pw)
         except RotationError as e:
             # Abort before touching .env or rolling: consumers must keep the value that still matches
-            # the live credential. The state stays "staged", so `rollback` can simply be re-run.
+            # the live credential. The state is left as it was ("staged" or "pending"), so `rollback` can simply be re-run.
             self.out(f"[{name}] ERROR: could not restore the live credential: {e}")
             raise RotationError(
                 f"{name}: the live credential is still the NEW one, and .env, the state and the running "
@@ -756,13 +766,13 @@ class Rotator:
                 self.roll(list(s.services), entry.get("recreate"))
         except RotationError as e:
             # .env already holds the old value but the services may still run the new one. Keep the state
-            # "staged" and every backup so `rollback` can be re-run: each step above is idempotent (the
+            # "staged" (or "pending") and every backup so `rollback` can be re-run: each step above is idempotent (the
             # credential reset to the old value, .env rewritten from the same backup, the roll itself),
             # and the new key file is only deleted after a successful roll.
             self.out(f"[{name}] ERROR: re-roll after rollback failed: {e}")
             raise RotationError(
                 f"{name}: .env holds the OLD value but the services may still run the NEW one, and the state "
-                f"stays staged with its backup. Re-run `rollback {retry_name(name)}` once the rollout works") from None
+                f"stays staged (or pending) with its backup. Re-run `rollback {retry_name(name)}` once the rollout works") from None
         if entry.get("new_key_file"):
             Path(entry["new_key_file"]).unlink(missing_ok=True)
         if not self.verify(list(s.services) + list(entry.get("recreate") or []), started):
@@ -777,8 +787,26 @@ class Rotator:
         self._unlink_unreferenced(entry.get("backups", [entry["backup"]]))
         self.out(f"[{name}] rolled back ({reason})")
 
+    def _resolve_pending_forward_only(self, name: str, s: mf.Secret, entry: dict[str, Any]) -> None:
+        """Clear the journal of a forward-only secret whose `stage` was killed. The old value is revoked at
+        the provider, so it is never restored: the entry only moves to whatever the on-disk `.env` implies."""
+        old_env = (self.base / entry["backup"]).read_text(encoding="utf-8")
+        env = self.env_text()
+        if all(get_env(env, v) == get_env(old_env, v) for v in entry["vars"]):
+            # The write never happened: the new value was lost with the killed process.
+            self.update_state(name, step="idle", backups=[], rolled_back_reason="interrupted before the .env write")
+            self._unlink_unreferenced(entry.get("backups", [entry["backup"]]))
+            self.out(f"[{name}] the interrupted stage never wrote the new value: it was lost with the killed "
+                     f"process. Get a fresh one from the provider and `stage {name}` again.")
+            return
+        self.update_state(name, step="staged")  # the backups stay referenced: `finalize` cleans them as usual
+        self.out(f"[{name}] the interrupted stage had written the new value to .env, so the entry is now "
+                 f"`staged` (the old value is revoked and is NOT restored). Not rolled automatically. "
+                 f"Recover by hand: check .env holds the value the provider issued, then run "
+                 f"`./deploy-rollout.sh roll {' '.join(s.services)}` and `rotate.py verify`.")
+
     def _unlink_unreferenced(self, files: list[str]) -> None:
-        """Delete env backups no live (staged/migrated) secret still points at (bundles share one)."""
+        """Delete env backups no live (pending/staged/migrated) secret still points at (bundles share one)."""
         live = {b for e in self.load_state()["secrets"].values()
                 if e.get("step") in ("pending", "staged", "migrated") for b in e.get("backups", [])}
         for f in files:

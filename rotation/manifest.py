@@ -146,8 +146,9 @@ BUNDLES: dict[str, tuple[str, ...]] = {
 }
 _BUNDLE_OF = {n: b for b, names in BUNDLES.items() for n in names}
 
-# Never part of a --group: ordering matters (Telegram goes last, BotFather revokes the old token instantly).
-# The legacy Stripe secret is never staged at all (see NOT_DIRECTLY_ROTATABLE), so it is excluded here too.
+# Never part of a --group:
+# - TELEGRAM_BOT_TOKEN: ordering matters (it goes last, BotFather revokes the old token instantly).
+# - STRIPE_WEBHOOK_SECRET: never staged at all (see NOT_DIRECTLY_ROTATABLE).
 BY_NAME_ONLY = frozenset({"TELEGRAM_BOT_TOKEN", "STRIPE_WEBHOOK_SECRET"})
 
 # Name -> the secret to roll instead. Staging these directly would swap the value with no grace period.

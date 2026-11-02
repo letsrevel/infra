@@ -34,17 +34,18 @@ ssh -t revel 'cd infra && ./rotation/rotate.py status'
 | `plan` | Per secret: kind, set/unset, step, grace end, services that get rolled. |
 | `status` | Same without the services column. |
 | `check [--example PATH]` | Drift check. Fails (exit 1) on any key matching `SECRET\|TOKEN\|KEY\|PASSWORD\|WEBHOOK_URL` in `.env.example` (commented ones included) or the live `.env` that is not in the manifest. Lists manifest secrets that are not set in `.env`. Runs in CI against `.env.example`. |
-| `stage <name...>` / `stage --group self\|thirdparty\|all` | Back up `.env` (`.env.bak.<ts>`, 0600), edit only the target lines, record the step, roll the affected services, `verify`. A failed verify restores that secret and rolls again; if that rollback itself cannot complete (the live credential is not restorable, or the recovery roll fails), the secret stays `staged` and the command exits non-zero (see the rollback rules below). `--batch` rolls and verifies once for the whole invocation (on failure it rolls each secret back, one by one: a secret whose rollback fails is reported, stays `staged` and must be rolled back again with `rollback <name>` (`rollback <bundle>` for a bundle member), and the exit code is non-zero); it does not apply to `SECRET_KEY` / `SALT_KEY`, which always roll twice. Unset secrets are skipped, except `STRIPE_WEBHOOK_SECRETS` (a list), which is staged even when unset: it is seeded from the legacy `STRIPE_WEBHOOK_SECRET` so no endpoint loses its secret before the grace period. Pressing Enter at a hidden prompt skips that secret (`skipped <NAME>`, not an error; for a bundle, the whole bundle). Paired credentials are bundles (below). `DB_PASSWORD` is refused in `--batch` and next to any other secret. The legacy `STRIPE_WEBHOOK_SECRET` is refused (roll `STRIPE_WEBHOOK_SECRETS`). |
+| `stage <name...>` / `stage --group self\|thirdparty\|all` | Back up `.env` (`.env.bak.<ts>`, 0600), edit only the target lines, record the step, roll the affected services, `verify`. A failed verify restores that secret and rolls again; if that rollback itself cannot complete (the live credential is not restorable, or the recovery roll fails), the secret stays `staged` and the command exits non-zero (see the rollback rules below). `--batch` rolls and verifies once for the whole invocation (on failure it rolls each secret back, one by one: a secret whose rollback fails is reported, stays `staged` and must be rolled back again with `rollback <name>` (`rollback <bundle>` for a bundle member), and the exit code is non-zero); it does not apply to `SECRET_KEY` / `SALT_KEY`, which always roll twice. Unset secrets are skipped, except `STRIPE_WEBHOOK_SECRETS` (a list), which is staged even when unset: when the list is empty it is seeded from the legacy `STRIPE_WEBHOOK_SECRET`, so no endpoint loses its secret before the grace period. Pressing Enter at a hidden prompt skips that secret (`skipped <NAME>`, not an error; for a bundle, the whole bundle). Paired credentials are bundles (below). `DB_PASSWORD` is refused in `--batch` and next to any other secret. The legacy `STRIPE_WEBHOOK_SECRET` is refused (roll `STRIPE_WEBHOOK_SECRETS`). |
 | `migrate` | `rotate_encrypted_fields`, then `rotate_encrypted_fields --verify`, for staged `SECRET_KEY` / `SALT_KEY`. |
 | `verify` | Health, API, frontend, `manage.py check`, error-line budget (below). |
 | `finalize <name...> [--force] [--no-archive]` | After the grace window. Order: trial-encrypt to the recipient, **archive the retired values with `age`**, then edit `.env`, roll, verify, then delete the run's `.env.bak.*` (and, for OIDC, the retired PEM, only if it was archived and sits inside `certs/`). An archive failure leaves `.env`, the state and the backups untouched. If verify fails after the edit, the old values are restored, the plaintext copy is deleted and the roll is repeated; if that roll fails too the tool says the services are out of sync and prints the command to re-roll. |
-| `rollback <name...>` | Restore the secret's previous values from its backup (only while `staged`). See the rollback rule below; `TELEGRAM_BOT_TOKEN` is forward-only and `rollback` refuses it. A bundle is rolled back as a whole: name the bundle (`rollback aws`) or every member. Members already rolled back are skipped, so the same command retries a bundle that got stuck halfway. |
+| `rollback <name...>` | Restore the secret's previous values from its backup (while `staged` or `pending`). See the rollback rule below; `TELEGRAM_BOT_TOKEN` is forward-only and `rollback` refuses it. A bundle is rolled back as a whole: name the bundle (`rollback aws`) or every member. Members already rolled back are skipped, so the same command retries a bundle that got stuck halfway. |
 
 Groups: `self` = `SECRET_KEY`, `SALT_KEY`, OIDC key, Grafana password. `thirdparty` = everything
 rolled in a provider console, plus `STRIPE_WEBHOOK_SECRETS`, except `TELEGRAM_BOT_TOKEN`. `DB_PASSWORD` and
 `TELEGRAM_BOT_TOKEN` are in no group: they are staged by name only. The legacy `STRIPE_WEBHOOK_SECRET` is in no group
 either and `stage` refuses it (`plan` shows `via STRIPE_WEBHOOK_SECRETS`): roll `STRIPE_WEBHOOK_SECRETS`, which is seeded
-from it and keeps it valid for the grace period.
+from it (only when the list is empty) and keeps it valid for the grace period. `finalize` drops the old list items but leaves
+the legacy `STRIPE_WEBHOOK_SECRET` line in `.env`: it is simply unused while the list is set, and you may remove it by hand.
 
 ### Two-phase stage for `SECRET_KEY` / `SALT_KEY`
 
@@ -72,7 +73,7 @@ aborts before touching `.env` or rolling anything: the credential is still the n
 state still match it, and you re-run `rollback` once the service is back.
 
 If the recovery roll fails after `.env` was restored, `rollback` raises as well: `.env` holds the old value,
-but the services may still run the new one. The secret stays `staged` and no backup is deleted (nor the new
+but the services may still run the new one. The secret stays `staged` (or `pending`, if the rollback started from there) and no backup is deleted (nor the new
 OIDC key file), so re-run `rollback <name>` once the rollout works. Every step is idempotent (credential reset
 to the old value, `.env` rewritten from the same backup, roll). A bundle is rolled back member by member and a
 failing member does not stop the others; re-run `rollback <bundle>` (e.g. `rollback aws`): members already rolled back (`idle`) are skipped with `already rolled back, skipping`, and the stuck ones are retried. Naming only some members is refused, as for `stage`.
@@ -82,13 +83,18 @@ failing member does not stop the others; re-run `rollback <bundle>` (e.g. `rollb
 Before `stage` touches `.env` or a live credential (`ALTER ROLE`, Grafana reset) it records the secret as
 `pending` in `state.json` (backup name and touched variables included), and flips it to `staged` once the
 change is done. A hard kill in between (SIGKILL, power loss, ssh drop) therefore leaves the secret `pending`
-with its `.env.bak.*` kept. So does any other interruption once a live credential may have changed (Ctrl-C
-while `psql` runs, a failed state write after `ALTER ROLE`): `.env` then keeps the new value. Only a clean
-failure of the credential command itself (non-zero exit, nothing applied) is undone on the spot; `status` shows `pending (interrupted: run rollback)`. Until it is cleared,
+with its `.env.bak.*` kept; `status` shows `pending (interrupted: run rollback)`. Any failure before a live
+credential could have changed (a failed `.env` write, a clean non-zero exit of the credential command) is undone on
+the spot: `.env` and the state are restored and the backup deleted. The cases where a live credential may have
+changed (Ctrl-C while `psql` runs, a failed state write after `ALTER ROLE`) keep `.env` new and the entry `pending`.
+If `.env` itself cannot be restored, or the state cannot be restored after it, the entry stays `pending` with its
+backup: run `rollback`. Until it is cleared,
 `stage`, `migrate` and `finalize` refuse to run; `verify` and `check` still work. Run `rollback <name>`
 (`rollback <bundle>` for a bundle member): it restores the old values from the backup and is safe whether or
 not the `.env` write or the credential change happened. A phase-2 `SECRET_KEY` / `SALT_KEY` promotion goes
-back to phase 1 with the new key kept in the fallbacks, as for any rollback of phase 2.
+back to phase 1 with the new key kept in the fallbacks, as for any rollback of phase 2. `ever_primary` stays set
+after that (conservative: if `.env` was written and something rolled the services, the new key may have been
+primary), so the secret returns to phase 1 and the rotation can only be promoted again, not dropped. Nothing is lost.
 
 ### Bundles
 
@@ -97,7 +103,7 @@ rolled back together: `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (`aws`), and
 `APPLE_WALLET_CERT_PATH` + `APPLE_WALLET_KEY_PATH` + `APPLE_WALLET_KEY_PASSWORD` (`apple_wallet`).
 Naming only some members is an error that names the bundle. If a required member is unset in `.env` the whole bundle is skipped (`skipped bundle <name>: <member> is unset, nothing was changed`); only optional members (`APPLE_WALLET_KEY_PASSWORD`, a key may have no password) may be unset.
 
-States per secret: `idle -> staged -> (migrated) -> finalized`, and `staged -> idle` on rollback.
+States per secret: `idle|finalized -> pending -> staged -> (migrated) -> finalized` (`pending` is the journal entry during `stage`), `pending -> idle` and `staged -> idle` on rollback; for forward-only secrets `pending` resolves as described below.
 `SECRET_KEY` and `SALT_KEY` cannot finalize before `migrate` (not even with `--force`).
 One-shot secrets (a Stripe key, a token) sit in `staged` until you `finalize` them, which archives
 the old value and deletes the plaintext `.env.bak.*`; do this once the old credential is revoked.
@@ -108,7 +114,11 @@ BotFather `/revoke` kills the old token the moment you do it, so the old value c
 `stage TELEGRAM_BOT_TOKEN` (by name, never in a group or `--batch`) asks you to type
 `TELEGRAM REVOKED` once you have revoked, then for the new token. If `verify` fails, the new token is
 KEPT in `.env` and the tool prints the recovery steps (check the token, then
-`./deploy-rollout.sh roll telegram` and `rotate.py verify`). `rollback TELEGRAM_BOT_TOKEN` is refused.
+`./deploy-rollout.sh roll telegram` and `rotate.py verify`). `rollback TELEGRAM_BOT_TOKEN` is refused while it is `staged`.
+If `stage` was killed and left it `pending`, `rollback TELEGRAM_BOT_TOKEN` only resolves the journal and never restores
+the revoked token: if `.env` holds the new token the entry becomes `staged` and the tool prints the manual recovery
+(check `.env`, `./deploy-rollout.sh roll telegram`, `rotate.py verify`); if `.env` is unchanged the new token was lost
+with the process, the entry goes back to `idle` and its backup is deleted, so get a fresh token and `stage` again.
 
 ### Verify
 

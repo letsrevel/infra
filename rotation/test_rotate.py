@@ -1296,5 +1296,75 @@ class LiveCredentialInterruptTests(Base):
         self.assertNotIn("DB_PASSWORD", rot.load_state()["secrets"])
 
 
+class ForwardOnlyPendingTests(Base):
+    """A hard-killed `stage` of a forward-only secret must not deadlock the global pending guard."""
+
+    def killed_telegram_stage(self) -> r.Rotator:
+        rot = self.make(prompts=["tg-NEW"], files=[r.TELEGRAM_CONFIRM_PHRASE])
+        self.assertEqual(rot.stage(["TELEGRAM_BOT_TOKEN"]), 0)
+        state = rot.load_state()
+        state["secrets"]["TELEGRAM_BOT_TOKEN"]["step"] = "pending"
+        rot.save_state(state)
+        return rot
+
+    def test_pending_with_new_value_written_resolves_to_staged(self) -> None:
+        self.killed_telegram_stage()
+        rot = self.make()
+        with self.assertRaisesRegex(r.RotationError, "interrupted while changing TELEGRAM_BOT_TOKEN"):
+            rot.stage(["STRIPE_SECRET_KEY"])
+        rot.rollback("TELEGRAM_BOT_TOKEN")
+        self.assertEqual(rot.step_of("TELEGRAM_BOT_TOKEN"), "staged")
+        self.assertEqual(self.env("TELEGRAM_BOT_TOKEN"), "tg-NEW")  # never restored
+        backup = rot.load_state()["secrets"]["TELEGRAM_BOT_TOKEN"]["backup"]
+        self.assertTrue((self.tmp / backup).exists())
+        text = "\n".join(self.out)
+        self.assertIn("deploy-rollout.sh roll telegram", text)
+        self.assertIn("rotate.py verify", text)
+        self.assertNotIn("tg-NEW", text)
+        rot.refuse_if_interrupted()  # the guard no longer blocks
+
+    def test_pending_with_env_unchanged_resolves_to_idle(self) -> None:
+        rot = self.killed_telegram_stage()
+        backup = rot.load_state()["secrets"]["TELEGRAM_BOT_TOKEN"]["backup"]
+        (self.tmp / ".env").write_text((self.tmp / backup).read_text())  # the write never happened
+        rot.rollback("TELEGRAM_BOT_TOKEN")
+        entry = rot.load_state()["secrets"]["TELEGRAM_BOT_TOKEN"]
+        self.assertEqual((entry["step"], entry["backups"]), ("idle", []))
+        self.assertFalse((self.tmp / backup).exists())
+        self.assertEqual(self.env("TELEGRAM_BOT_TOKEN"), "tg-old")
+        self.assertIn("stage TELEGRAM_BOT_TOKEN", "\n".join(self.out))
+        rot.refuse_if_interrupted()
+
+    def test_staged_forward_only_rollback_is_still_refused(self) -> None:
+        rot = self.make(prompts=["tg-NEW"], files=[r.TELEGRAM_CONFIRM_PHRASE])
+        rot.stage(["TELEGRAM_BOT_TOKEN"])
+        with self.assertRaisesRegex(r.RotationError, "cannot be rolled back"):
+            rot.rollback("TELEGRAM_BOT_TOKEN")
+
+
+class RevertStateRestoreFailureTests(Base):
+    def test_failed_state_restore_keeps_the_backup_and_rollback_finishes(self) -> None:
+        rot = self.make(maintenance=True, files=[r.DB_CONFIRM_PHRASE], fail=lambda line: "psql" in line)
+        real, calls = rot.save_state, []
+
+        def save(state):
+            calls.append(1)
+            if len(calls) == 2:  # the restore after the clean psql failure
+                raise OSError("disk full")
+            real(state)
+
+        with mock.patch.object(rot, "save_state", save), self.assertRaises(OSError):
+            rot.stage(["DB_PASSWORD"])
+        self.assertEqual(self.env("DB_PASSWORD"), "olddbpass")
+        self.assertEqual(rot.step_of("DB_PASSWORD"), "pending")
+        backup = rot.load_state()["secrets"]["DB_PASSWORD"]["backup"]
+        self.assertTrue((self.tmp / backup).exists())
+        self.assertIn("stays pending", "\n".join(self.out))
+        rot = self.make()
+        rot.rollback("DB_PASSWORD")
+        self.assertEqual(rot.step_of("DB_PASSWORD"), "idle")
+        self.assertEqual(self.env("DB_PASSWORD"), "olddbpass")
+
+
 if __name__ == "__main__":
     unittest.main()
