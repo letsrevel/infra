@@ -34,11 +34,11 @@ ssh -t revel 'cd infra && ./rotation/rotate.py status'
 | `plan` | Per secret: kind, set/unset, step, grace end, services that get rolled. |
 | `status` | Same without the services column. |
 | `check [--example PATH]` | Drift check. Fails (exit 1) on any key matching `SECRET\|TOKEN\|KEY\|PASSWORD\|WEBHOOK_URL` in `.env.example` (commented ones included) or the live `.env` that is not in the manifest. Lists manifest secrets that are not set in `.env`. Runs in CI against `.env.example`. |
-| `stage <name...>` / `stage --group self\|thirdparty\|all` | Back up `.env` (`.env.bak.<ts>`, 0600), edit only the target lines, record the step, roll the affected services, `verify`. A failed verify restores that secret and rolls again. `--batch` rolls and verifies once for the whole invocation (on failure it rolls each secret back, one by one: a secret whose rollback fails is reported, stays `staged` and must be rolled back again with `rollback <name>`, and the exit code is non-zero); it does not apply to `SECRET_KEY` / `SALT_KEY`, which always roll twice. Unset secrets are skipped, except `STRIPE_WEBHOOK_SECRETS` (a list), which is staged even when unset: it is seeded from the legacy `STRIPE_WEBHOOK_SECRET` so no endpoint loses its secret before the grace period. Pressing Enter at a hidden prompt skips that secret (`skipped <NAME>`, not an error; for a bundle, the whole bundle). Paired credentials are bundles (below). `DB_PASSWORD` is refused in `--batch` and next to any other secret. |
+| `stage <name...>` / `stage --group self\|thirdparty\|all` | Back up `.env` (`.env.bak.<ts>`, 0600), edit only the target lines, record the step, roll the affected services, `verify`. A failed verify restores that secret and rolls again; if that rollback itself cannot complete (the live credential is not restorable, or the recovery roll fails), the secret stays `staged` and the command exits non-zero (see the rollback rules below). `--batch` rolls and verifies once for the whole invocation (on failure it rolls each secret back, one by one: a secret whose rollback fails is reported, stays `staged` and must be rolled back again with `rollback <name>` (`rollback <bundle>` for a bundle member), and the exit code is non-zero); it does not apply to `SECRET_KEY` / `SALT_KEY`, which always roll twice. Unset secrets are skipped, except `STRIPE_WEBHOOK_SECRETS` (a list), which is staged even when unset: it is seeded from the legacy `STRIPE_WEBHOOK_SECRET` so no endpoint loses its secret before the grace period. Pressing Enter at a hidden prompt skips that secret (`skipped <NAME>`, not an error; for a bundle, the whole bundle). Paired credentials are bundles (below). `DB_PASSWORD` is refused in `--batch` and next to any other secret. |
 | `migrate` | `rotate_encrypted_fields`, then `rotate_encrypted_fields --verify`, for staged `SECRET_KEY` / `SALT_KEY`. |
 | `verify` | Health, API, frontend, `manage.py check`, error-line budget (below). |
 | `finalize <name...> [--force] [--no-archive]` | After the grace window. Order: trial-encrypt to the recipient, **archive the retired values with `age`**, then edit `.env`, roll, verify, then delete the run's `.env.bak.*` (and, for OIDC, the retired PEM, only if it was archived and sits inside `certs/`). An archive failure leaves `.env`, the state and the backups untouched. If verify fails after the edit, the old values are restored, the plaintext copy is deleted and the roll is repeated; if that roll fails too the tool says the services are out of sync and prints the command to re-roll. |
-| `rollback <name...>` | Restore the secret's previous values from its backup (only while `staged`). See the rollback rule below; `TELEGRAM_BOT_TOKEN` is forward-only and `rollback` refuses it. A bundle is rolled back as a whole: name every member or the bundle (`rollback aws`). |
+| `rollback <name...>` | Restore the secret's previous values from its backup (only while `staged`). See the rollback rule below; `TELEGRAM_BOT_TOKEN` is forward-only and `rollback` refuses it. A bundle is rolled back as a whole: name the bundle (`rollback aws`) or every member. Members already rolled back are skipped, so the same command retries a bundle that got stuck halfway. |
 
 Groups: `self` = `SECRET_KEY`, `SALT_KEY`, OIDC key, Grafana password. `thirdparty` = everything
 rolled in a provider console, plus `STRIPE_WEBHOOK_SECRETS`, except `TELEGRAM_BOT_TOKEN`. `DB_PASSWORD` and
@@ -73,7 +73,7 @@ If the recovery roll fails after `.env` was restored, `rollback` raises as well:
 but the services may still run the new one. The secret stays `staged` and no backup is deleted (nor the new
 OIDC key file), so re-run `rollback <name>` once the rollout works. Every step is idempotent (credential reset
 to the old value, `.env` rewritten from the same backup, roll). A bundle is rolled back member by member and a
-failing member does not stop the others; re-run `rollback` naming just the stuck members (members already `idle` are refused).
+failing member does not stop the others; re-run `rollback <bundle>` (e.g. `rollback aws`): members already rolled back (`idle`) are skipped with `already rolled back, skipping`, and the stuck ones are retried. Naming only some members is refused, as for `stage`.
 
 ### Bundles
 
@@ -177,8 +177,8 @@ recreate it. Do not run that casually afterwards; use `deploy-rollout.sh deploy`
 Columns in an old dump are encrypted under the `SECRET_KEY` x `SALT_KEY` of that time, and the
 retired values are in `rotation/archive/*.age`.
 
-1. From the infra root, copy the retired keys into the `*_FALLBACKS` variables of `.env`. List **every**
-   archive file written since the backup was taken (the names are dated): `finalize` writes one file per secret,
+1. From the infra root, copy the retired keys into the `*_FALLBACKS` variables of `.env`. List `rotation/archive/*.age` and pick **every**
+   file dated after the backup was taken (by the date in its name; do not assume the names): `finalize` writes one file per secret,
    so rotating both keys leaves two files, and one file can hold several retired values. Every retired
    `SECRET_KEY` / `SALT_KEY` found is added (an old dump decrypts under any of them) and values already in a
    `*_FALLBACKS` variable are kept. The secrets never reach the terminal: the archives are decrypted into a fresh
@@ -216,7 +216,8 @@ retired values are in `rotation/archive/*.age`.
 4. `docker compose exec -T web python manage.py rotate_encrypted_fields`, then `... --verify`.
 5. Remove the retired values from the two `*_FALLBACKS` variables again and roll.
 
-Each `finalize` writes its own age file (`<UTC date>.age`, or `<date>-<time>-<name>.age` when that exists):
+Each `finalize` writes its own age file, created exclusively with mode 0600 (UTC): `<YYYY-MM-DD>.age`, or
+`<YYYY-MM-DD-HHMMSS>-<NAME>.age` when that exists, or `<YYYY-MM-DD-HHMMSS>-<NAME>-<N>.age` when that exists too.
 age streams cannot be concatenated, so nothing is appended. Archived OIDC keys appear as
 `OIDC_SIGNING_KEY_FILE:<path>=<base64 PEM>`. Back the archive up off the host.
 
