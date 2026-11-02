@@ -638,6 +638,7 @@ class Rotator:
                 grace_end=(now + s.grace).isoformat() if s.grace and p.extra.get("phase", 2) == 2 else None,
                 updated_at=now.isoformat(), **extra)
             state["secrets"][s.name] = entry
+        live_done = live_running = False
         try:
             self.save_state(state)
             # The new value reaches .env FIRST (the backup stays); only then does a live credential change,
@@ -648,12 +649,22 @@ class Rotator:
             write_atomic(self.env_path, env)
             for _, p in plans:
                 if p.before:
+                    live_running = True
                     p.before()
+                    live_running, live_done = False, True
             state = self.load_state()
             for s, _ in plans:
                 state["secrets"][s.name]["step"] = "staged"
             self.save_state(state)
-        except BaseException:
+        except BaseException as exc:
+            # A live credential may already be the new one once any before() completed, or when one was cut
+            # short by anything but its own clean failure (RotationError: the command exited non-zero, so the
+            # server applied nothing). Then .env keeps the new value and the journal stays pending.
+            if live_done or (live_running and not isinstance(exc, RotationError)):
+                names = " ".join(dict.fromkeys(retry_name(s.name) for s, _ in plans))
+                self.out(f"WARNING: interrupted after a live credential may have changed: .env keeps the new "
+                         f"value and the state stays pending; run `rollback {names}`")
+                raise
             try:
                 if self.env_path.read_text(encoding="utf-8") != original:
                     write_atomic(self.env_path, original)

@@ -82,7 +82,9 @@ failing member does not stop the others; re-run `rollback <bundle>` (e.g. `rollb
 Before `stage` touches `.env` or a live credential (`ALTER ROLE`, Grafana reset) it records the secret as
 `pending` in `state.json` (backup name and touched variables included), and flips it to `staged` once the
 change is done. A hard kill in between (SIGKILL, power loss, ssh drop) therefore leaves the secret `pending`
-with its `.env.bak.*` kept; `status` shows `pending (interrupted: run rollback)`. Until it is cleared,
+with its `.env.bak.*` kept. So does any other interruption once a live credential may have changed (Ctrl-C
+while `psql` runs, a failed state write after `ALTER ROLE`): `.env` then keeps the new value. Only a clean
+failure of the credential command itself (non-zero exit, nothing applied) is undone on the spot; `status` shows `pending (interrupted: run rollback)`. Until it is cleared,
 `stage`, `migrate` and `finalize` refuse to run; `verify` and `check` still work. Run `rollback <name>`
 (`rollback <bundle>` for a bundle member): it restores the old values from the backup and is safe whether or
 not the `.env` write or the credential change happened. A phase-2 `SECRET_KEY` / `SALT_KEY` promotion goes

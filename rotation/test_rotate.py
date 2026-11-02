@@ -1251,5 +1251,50 @@ class ManifestTests(unittest.TestCase):
             r.select(["NOPE"], None)
 
 
+class LiveCredentialInterruptTests(Base):
+    """An exception caught in-process after the live credential may have changed must keep the journal."""
+
+    def assert_kept_pending(self, rot: r.Rotator) -> None:
+        self.assertEqual(rot.step_of("DB_PASSWORD"), "pending")
+        self.assertNotEqual(self.env("DB_PASSWORD"), "olddbpass")  # .env keeps the (possibly live) new value
+        backup = rot.load_state()["secrets"]["DB_PASSWORD"]["backup"]
+        self.assertTrue((self.tmp / backup).exists())
+        rot = self.make()
+        rot.rollback("DB_PASSWORD")
+        self.assertEqual(self.env("DB_PASSWORD"), "olddbpass")
+        self.assertEqual(rot.step_of("DB_PASSWORD"), "idle")
+
+    def test_ctrl_c_during_alter_role_keeps_the_entry_pending(self) -> None:
+        def interrupt_psql(call):
+            if "psql" in call.argv:
+                raise KeyboardInterrupt
+            return False
+
+        rot = self.make(maintenance=True, files=[r.DB_CONFIRM_PHRASE], fail_call=interrupt_psql)
+        with self.assertRaises(KeyboardInterrupt):
+            rot.stage(["DB_PASSWORD"])
+        self.assert_kept_pending(rot)
+
+    def test_failed_state_write_after_alter_role_keeps_the_entry_pending(self) -> None:
+        rot = self.make(maintenance=True, files=[r.DB_CONFIRM_PHRASE])
+        real, calls = rot.save_state, []
+
+        def save(state):
+            calls.append(1)
+            if len(calls) == 2:  # the "staged" save, after ALTER ROLE succeeded
+                raise OSError("disk full")
+            real(state)
+
+        with mock.patch.object(rot, "save_state", save), self.assertRaises(OSError):
+            rot.stage(["DB_PASSWORD"])
+        self.assert_kept_pending(rot)
+
+    def test_clean_alter_role_failure_still_reverts(self) -> None:
+        rot = self.make(maintenance=True, files=[r.DB_CONFIRM_PHRASE], fail_call=lambda c: "psql" in c.argv)
+        rot.stage(["DB_PASSWORD"])
+        self.assertEqual(self.env("DB_PASSWORD"), "olddbpass")
+        self.assertNotIn("DB_PASSWORD", rot.load_state()["secrets"])
+
+
 if __name__ == "__main__":
     unittest.main()
