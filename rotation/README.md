@@ -177,8 +177,12 @@ recreate it. Do not run that casually afterwards; use `deploy-rollout.sh deploy`
 Columns in an old dump are encrypted under the `SECRET_KEY` x `SALT_KEY` of that time, and the
 retired values are in `rotation/archive/*.age`.
 
-1. From the infra root, copy the retired keys into the `*_FALLBACKS` variables of `.env`. List `rotation/archive/*.age` and pick **every**
-   file dated after the backup was taken (by the date in its name; do not assume the names): `finalize` writes one file per secret,
+1. From the infra root, copy the retired keys into the `*_FALLBACKS` variables of `.env`. Pass **every** archive in
+   `rotation/archive/*.age`. That is the safe default: a retired value the dump does not need is harmless as a
+   fallback, and step 5 removes them again. Do not filter by the date in a file name or by file mtime: names are
+   UTC while backups use host-local time, the first archive of a day carries no time, and copying the archive off
+   the host resets mtimes. If you must narrow the list, keep every file dated from the day *before* the backup
+   onwards. `finalize` writes one file per secret,
    so rotating both keys leaves two files, and one file can hold several retired values. Every retired
    `SECRET_KEY` / `SALT_KEY` found is added (an old dump decrypts under any of them) and values already in a
    `*_FALLBACKS` variable are kept. The secrets never reach the terminal: the archives are decrypted into a fresh
@@ -187,7 +191,7 @@ retired values are in `rotation/archive/*.age`.
 
    ```sh
    ( d=$(mktemp -d) && trap 'rm -rf "$d"' EXIT || exit 1
-     for f in rotation/archive/<file>.age rotation/archive/<file>.age; do
+     for f in rotation/archive/*.age; do  # or your narrowed list
        age -d -i <your identity> -o "$d/$(basename "$f").env" "$f" || exit 1
      done
      python3 - "$d"/*.env <<'PY'
