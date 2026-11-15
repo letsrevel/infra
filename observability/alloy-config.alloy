@@ -91,6 +91,19 @@ loki.process "parse_json" {
       user_id     = "user_id",
       ip_address  = "ip_address",
       user_agent  = "user_agent",
+      // Short codes and ids only, never free text: structlog kwargs can carry emails and
+      // exception messages, so this stays an allowlist (see stage.output below).
+      code            = "code",
+      channel         = "channel",
+      provider        = "provider",
+      status          = "status",
+      count           = "count",
+      event_id        = "event_id",
+      organization_id = "organization_id",
+      org_id          = "org_id",
+      ticket_id       = "ticket_id",
+      delivery_id     = "delivery_id",
+      task_id         = "task_id",
     }
   }
 
@@ -110,6 +123,17 @@ loki.process "parse_json" {
       user_id     = "",
       ip_address  = "",
       user_agent  = "",
+      code            = "",
+      channel         = "",
+      provider        = "",
+      status          = "",
+      count           = "",
+      event_id        = "",
+      organization_id = "",
+      org_id          = "",
+      ticket_id       = "",
+      delivery_id     = "",
+      task_id         = "",
     }
   }
 
