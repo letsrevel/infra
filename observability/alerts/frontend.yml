@@ -61,9 +61,9 @@ groups:
       # 12h window and the >1000 floor after ~1 week of observed baselines.
       - alert: NoSuccessfulLogins
         expr: |
-          (sum(increase(django_http_responses_total_by_view_transport_method_total{view=~".*login.*", status="200"}[12h])) or vector(0)) == 0
+          (sum(increase(django_http_responses_total_by_status_view_method_total{view=~"api:(token_obtain_pair|token_obtain_pair_otp)", status="200"}[12h])) or vector(0)) == 0
           and on()
-          sum(increase(django_http_requests_total[12h])) > 1000
+          sum(increase(django_http_requests_total_by_view_transport_method_total{view!~"prometheus-django-metrics|api:healthcheck"}[12h])) > 1000
         for: 30m
         labels:
           severity: critical

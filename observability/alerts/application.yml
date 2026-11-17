@@ -38,7 +38,7 @@ groups:
 
       # Slow HTTP Requests
       - alert: SlowHTTPRequests
-        expr: histogram_quantile(0.95, rate(django_http_requests_latency_seconds_bucket[5m])) > 2
+        expr: histogram_quantile(0.95, sum by (le) (rate(django_http_requests_latency_seconds_by_view_method_bucket{view!~"prometheus-django-metrics|api:healthcheck"}[5m]))) > 2
         for: 5m
         labels:
           severity: warning
@@ -48,7 +48,7 @@ groups:
 
       # High Request Rate
       - alert: HighRequestRate
-        expr: sum(rate(django_http_requests_total[5m])) > 1000
+        expr: sum(rate(django_http_requests_before_middlewares_total[5m])) > 1000
         for: 5m
         labels:
           severity: info
@@ -72,7 +72,7 @@ groups:
 
       # High Authentication Failure Rate
       - alert: HighAuthenticationFailureRate
-        expr: rate(django_http_responses_total_by_view_transport_method_total{view=~".*login.*",status="401"}[5m]) > 10
+        expr: sum(rate(django_http_responses_total_by_status_view_method_total{view=~"api:(token_obtain_pair|token_obtain_pair_otp)",status="401"}[5m])) > 10
         for: 5m
         labels:
           severity: warning
@@ -157,8 +157,10 @@ groups:
       # ========================================================================
 
       # Low Active Users
+      # Excludes scrapes/healthchecks. Baseline (Nov 2026): quietest hour ~60 real requests,
+      # p10 ~110, so the floor sits well below normal night traffic.
       - alert: LowActiveUsers
-        expr: sum(increase(django_http_requests_total[1h])) < 100
+        expr: sum(increase(django_http_requests_total_by_view_transport_method_total{view!~"prometheus-django-metrics|api:healthcheck"}[1h])) < 20
         for: 2h
         labels:
           severity: info
@@ -168,7 +170,7 @@ groups:
 
       # High User Registration Rate
       - alert: HighUserRegistrationRate
-        expr: rate(django_http_responses_total_by_view_transport_method_total{view=~".*register.*",status="200"}[5m]) > 5
+        expr: sum(rate(django_http_responses_total_by_status_view_method_total{view="api:register-account",status="201"}[5m])) > 5
         for: 10m
         labels:
           severity: info
@@ -182,13 +184,13 @@ groups:
 
       # High External API Error Rate
       - alert: HighExternalAPIErrorRate
-        expr: rate(django_http_requests_exceptions_total[5m]) > 1
+        expr: sum(rate(django_http_exceptions_total_by_type_total{type!="Http404"}[5m])) > 1
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "High rate of exceptions in external API calls"
-          description: "Detecting {{ $value }} exceptions per second when calling external APIs."
+          summary: "High rate of unhandled view exceptions"
+          description: "Detecting {{ $value }} unhandled exceptions per second escaping Django views (often a failing external API)."
 
       # Telegram Bot Issues
       - alert: TelegramBotDown

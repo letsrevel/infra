@@ -124,11 +124,11 @@ This reduces notification spam by bundling related alerts.
 - **ClamAVDown** - Antivirus scanning disabled
 - **HighAuthenticationFailureRate** - Possible brute force attack
 - **ElevatedRateLimiting** - Sustained HTTP 429s (throttling); see `docs/runbooks/rate-limit-429s.md` in revel-backend
-- **HighExternalAPIErrorRate** - External API integration issues
+- **HighExternalAPIErrorRate** - More than 1/s unhandled view exceptions (Http404 excluded), often a failing external API
 - **TelegramBotDown** - Telegram bot service down
 
 #### Info
-- **LowActiveUsers** - Less than 100 requests in past hour
+- **LowActiveUsers** - Fewer than 20 real requests (scrapes and healthchecks excluded) in the past hour, for 2h
 - **HighUserRegistrationRate** - Unusual signup activity
 - **HighRequestRate** - Traffic above 1000 req/s
 

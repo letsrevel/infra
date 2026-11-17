@@ -65,7 +65,22 @@ services:
       # would sit in Tempo for 30 days. Regex, matched against the URL without
       # its query string.
       OTEL_PYTHON_DJANGO_EXCLUDED_URLS: "api/notification-preferences/one-click"
+      # One metrics registry across gunicorn workers (revel-backend#757). Without it every
+      # worker keeps its own counters and each scrape reads a random one, so rates and counts
+      # are garbage. django-prometheus switches /metrics to MultiProcessCollector when this is
+      # set; src/gunicorn.conf.py empties the dir on master start and drops dead workers'
+      # live gauges.
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus_multiproc
     volumes:
+      # Per-container tmpfs, not a shared volume: docker rollout runs the old and new web
+      # containers side by side, and each must aggregate only its own workers.
+      # ponytail: counter/histogram files of recycled workers (--max-requests) stay until the
+      # container restarts — ~11/day at Nov 2026 traffic, cleared every deploy. If scrape time
+      # grows, lower the recycle rate or restart the container on a schedule.
+      - type: tmpfs
+        target: /tmp/prometheus_multiproc
+        tmpfs:
+          size: 67108864  # 64 MiB; files are sparse mmaps, real usage is a few MiB
       - ./media:/app/src/media
       - ./geo-data:/app/src/geo/data
       - ./sentinel:/app/src/questionnaires/llms/sentinel
