@@ -75,12 +75,14 @@ services:
       # Per-container tmpfs, not a shared volume: docker rollout runs the old and new web
       # containers side by side, and each must aggregate only its own workers.
       # ponytail: counter/histogram files of recycled workers (--max-requests) stay until the
-      # container restarts — ~11/day at Nov 2026 traffic, cleared every deploy. If scrape time
-      # grows, lower the recycle rate or restart the container on a schedule.
+      # container restarts: ~0.4-0.9 MB each, ~11/day at Nov 2026 traffic, so ~5-10 MB/day,
+      # cleared every deploy. A FULL tmpfs SIGBUSes workers, hence the generous cap (only
+      # touched pages count against memory) and the SlowMetricsScrape alert as early warning.
+      # Upgrade path: fold dead pids' files into one in gunicorn.conf.py's child_exit.
       - type: tmpfs
         target: /tmp/prometheus_multiproc
         tmpfs:
-          size: 67108864  # 64 MiB; files are sparse mmaps, real usage is a few MiB
+          size: 1073741824  # 1 GiB cap, months of headroom between deploys
       - ./media:/app/src/media
       - ./geo-data:/app/src/geo/data
       - ./sentinel:/app/src/questionnaires/llms/sentinel

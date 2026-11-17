@@ -118,13 +118,13 @@ This reduces notification spam by bundling related alerts.
 #### Warning
 - **HighHTTP4xxRate** - 4xx errors above 20%
 - **SlowHTTPRequests** - 95th percentile latency above 2s
+- **SlowMetricsScrape** - `/metrics` on web takes over 2s (dead-worker metric files piling up in the multiproc tmpfs)
 - **HighCeleryQueueLength** - More than 100 pending tasks
 - **HighCeleryTaskFailureRate** - Task failure rate above 10%
 - **SlowCeleryTasks** - Average task runtime above 60s
 - **ClamAVDown** - Antivirus scanning disabled
 - **HighAuthenticationFailureRate** - Possible brute force attack
 - **ElevatedRateLimiting** - Sustained HTTP 429s (throttling); see `docs/runbooks/rate-limit-429s.md` in revel-backend
-- **HighExternalAPIErrorRate** - More than 1/s unhandled view exceptions (Http404 excluded), often a failing external API
 - **TelegramBotDown** - Telegram bot service down
 
 #### Info
