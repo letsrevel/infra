@@ -59,9 +59,10 @@ groups:
       # Slow metrics scrape: the multiproc dir keeps every recycled gunicorn worker's
       # counter/histogram files until the web container restarts, and /metrics merges
       # them all on each scrape. A slow scrape is the early warning before the tmpfs
-      # fills (a full tmpfs SIGBUSes workers). Fix: redeploy/restart web.
+      # fills (a full tmpfs SIGBUSes workers). Fix: redeploy/restart web. Gated on up == 1
+      # because failed scrapes also record a (timeout-length) duration.
       - alert: SlowMetricsScrape
-        expr: scrape_duration_seconds{job="revel-web"} > 2
+        expr: scrape_duration_seconds{job="revel-web"} > 2 and on(job, instance) up{job="revel-web"} == 1
         for: 15m
         labels:
           severity: warning
@@ -171,8 +172,8 @@ groups:
       # Excludes scrapes/healthchecks. Baseline (Nov 2026): quietest hour ~60 real requests,
       # p10 ~110, so the floor sits well below normal night traffic. The login canary
       # alone adds a few dozen requests/h, so in practice this fires when the web app
-      # receives (almost) nothing at all. `or vector(0)`: the filtered sum is empty
-      # right after a restart, and an empty vector would never compare < 20.
+      # receives (almost) nothing at all. `or vector(0)`: if no application-view series
+      # remains in the window the sum is empty, and an empty vector never compares < 20.
       - alert: LowActiveUsers
         expr: (sum(increase(django_http_requests_total_by_view_transport_method_total{view!~"prometheus-django-metrics|api:healthcheck"}[1h])) or vector(0)) < 20
         for: 2h
