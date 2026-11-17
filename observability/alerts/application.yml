@@ -38,7 +38,7 @@ groups:
 
       # Slow HTTP Requests
       - alert: SlowHTTPRequests
-        expr: histogram_quantile(0.95, rate(django_http_requests_latency_seconds_bucket[5m])) > 2
+        expr: histogram_quantile(0.95, sum by (le) (rate(django_http_requests_latency_seconds_by_view_method_bucket{view!~"prometheus-django-metrics|api:healthcheck"}[5m]))) > 2
         for: 5m
         labels:
           severity: warning
@@ -48,13 +48,27 @@ groups:
 
       # High Request Rate
       - alert: HighRequestRate
-        expr: sum(rate(django_http_requests_total[5m])) > 1000
+        expr: sum(rate(django_http_requests_before_middlewares_total[5m])) > 1000
         for: 5m
         labels:
           severity: info
         annotations:
           summary: "High request rate detected"
           description: "Application is receiving {{ $value }} requests/second."
+
+      # Slow metrics scrape: the multiproc dir keeps every recycled gunicorn worker's
+      # counter/histogram files until the web container restarts, and /metrics merges
+      # them all on each scrape. A slow scrape is the early warning before the tmpfs
+      # fills (a full tmpfs SIGBUSes workers). Fix: redeploy/restart web. Gated on up == 1
+      # because failed scrapes also record a (timeout-length) duration.
+      - alert: SlowMetricsScrape
+        expr: scrape_duration_seconds{job="revel-web"} > 2 and on(job, instance) up{job="revel-web"} == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Web /metrics scrape is slow"
+          description: "Scraping web /metrics takes {{ $value }}s. Dead-worker metric files are accumulating in PROMETHEUS_MULTIPROC_DIR; restart the web container (or deploy) to clear them."
 
       # ========================================================================
       # Security Alerts
@@ -72,7 +86,7 @@ groups:
 
       # High Authentication Failure Rate
       - alert: HighAuthenticationFailureRate
-        expr: rate(django_http_responses_total_by_view_transport_method_total{view=~".*login.*",status="401"}[5m]) > 10
+        expr: sum(rate(django_http_responses_total_by_status_view_method_total{view=~"api:(token_obtain_pair|token_obtain_pair_otp)",status="401"}[5m])) > 10
         for: 5m
         labels:
           severity: warning
@@ -122,12 +136,10 @@ groups:
       # emergency priority (bypasses quiet hours, requires acknowledgment,
       # retries every 60s) — a human sees it out of hours.
       #
-      # IMPORTANT — presence, not rate: production gunicorn workers each keep
-      # their own registry (no PROMETHEUS_MULTIPROC_DIR — backend#757), so a
-      # scrape reaches one worker. `increase(...) > 0` is sound (the incremented
-      # worker holds its non-zero value until it is eventually scraped), but
-      # exact rates and counts are NOT — do not rewrite these as rate or
-      # threshold alerts.
+      # Presence, not rate: these are one-occurrence incidents. Web workers now
+      # share one registry (PROMETHEUS_MULTIPROC_DIR, backend#757), but the
+      # directory is wiped when the web container restarts, and increments made in
+      # Celery workers are not scraped at all — keep these as `increase(...) > 0`.
       #
       # Runbook: revel-backend docs/guides/observability.md (money-correctness),
       # which documents these rules verbatim. Each increment is paired with a
@@ -157,8 +169,13 @@ groups:
       # ========================================================================
 
       # Low Active Users
+      # Excludes scrapes/healthchecks. Baseline (Nov 2026): quietest hour ~60 real requests,
+      # p10 ~110, so the floor sits well below normal night traffic. The login canary
+      # alone adds a few dozen requests/h, so in practice this fires when the web app
+      # receives (almost) nothing at all. `or vector(0)`: if no application-view series
+      # remains in the window the sum is empty, and an empty vector never compares < 20.
       - alert: LowActiveUsers
-        expr: sum(increase(django_http_requests_total[1h])) < 100
+        expr: (sum(increase(django_http_requests_total_by_view_transport_method_total{view!~"prometheus-django-metrics|api:healthcheck"}[1h])) or vector(0)) < 20
         for: 2h
         labels:
           severity: info
@@ -168,7 +185,7 @@ groups:
 
       # High User Registration Rate
       - alert: HighUserRegistrationRate
-        expr: rate(django_http_responses_total_by_view_transport_method_total{view=~".*register.*",status="200"}[5m]) > 5
+        expr: sum(rate(django_http_responses_total_by_status_view_method_total{view="api:register-account",status="201"}[5m])) > 5
         for: 10m
         labels:
           severity: info
@@ -179,16 +196,6 @@ groups:
       # ========================================================================
       # Integration Alerts
       # ========================================================================
-
-      # High External API Error Rate
-      - alert: HighExternalAPIErrorRate
-        expr: rate(django_http_requests_exceptions_total[5m]) > 1
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "High rate of exceptions in external API calls"
-          description: "Detecting {{ $value }} exceptions per second when calling external APIs."
 
       # Telegram Bot Issues
       - alert: TelegramBotDown

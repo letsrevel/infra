@@ -371,7 +371,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum(rate(django_http_requests_total[5m]))",
+          "expr": "sum(rate(django_http_requests_before_middlewares_total[5m]))",
           "legendFormat": "Total Requests/s",
           "refId": "A"
         }
