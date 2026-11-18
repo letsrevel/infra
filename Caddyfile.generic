@@ -48,6 +48,7 @@
 		}
 	}
 }
+
 # User-uploaded media is served from the API origin, and file_server picks the
 # Content-Type from the file extension. Uploads must never render as a document
 # on this origin, whatever their type. Two layers:
@@ -56,11 +57,14 @@
 #    images (SVG included) keep working;
 #  - a sandbox CSP stops script even for an inline type. PDFs are exempt: the
 #    browsers' built-in PDF viewers do not load in a sandboxed document.
+#    `https:` next to 'self' is for a file opened directly in a tab: a sandboxed
+#    document has an opaque origin, and not every browser matches 'self' there.
+# The allowlist covers the passive types the backend accepts; keep it in step.
 (user_media_headers) {
-	@media_download not path *.png *.jpg *.jpeg *.gif *.webp *.avif *.ico *.mp3 *.m4a *.ogg *.wav *.mp4 *.webm *.mov *.pdf
+	@media_download not path *.png *.jpg *.jpeg *.gif *.webp *.avif *.bmp *.tif *.tiff *.heic *.heif *.ico *.mp3 *.m4a *.aac *.flac *.oga *.ogg *.opus *.wav *.mp4 *.m4v *.webm *.ogv *.mov *.pdf *.txt
 	header @media_download Content-Disposition attachment
 	@media_not_pdf not path *.pdf
-	header @media_not_pdf Content-Security-Policy "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; sandbox"
+	header @media_not_pdf Content-Security-Policy "default-src 'none'; img-src 'self' https:; media-src 'self' https:; style-src 'unsafe-inline'; sandbox"
 }
 
 

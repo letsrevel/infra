@@ -101,7 +101,7 @@ All three Caddyfiles can serve organizations on their own hostnames ([#67](https
 - Every frontend proxy overwrites `X-Forwarded-Host` and `X-Forwarded-Proto`, and the frontend runs with `HOST_HEADER` / `PROTOCOL_HEADER` and `PLATFORM_HOSTS` instead of `ORIGIN`. Keep `ORIGIN` out of `.env`.
 - The catch-all sends HSTS without `includeSubDomains` or `preload`: those domains are not ours.
 - Protected media echoes `Access-Control-Allow-Origin` from Django's CORS decision, so it works on the platform and on active custom domains alike. `CORS_ALLOWED_ORIGINS` must list the frontend origin (the wizard sets it).
-- Uploaded media (`/media/*`, protected or public) is served as a download unless it is a raster image, audio, video or PDF, and carries a sandbox `Content-Security-Policy` (PDFs excepted, so the browser's viewer works). Images embedded with `<img>` are unaffected, SVG logos included.
+- Uploaded media (`/media/*`, protected or public) is served as a download unless it is a raster image, audio, video, PDF or plain text, and carries a sandbox `Content-Security-Policy` (PDFs excepted, so the browser's viewer works). Images embedded with `<img>` are unaffected, SVG logos included.
 - Changing `CUSTOM_DOMAIN_CNAME_TARGET` needs `docker compose up -d caddy` (a recreate): Caddy reads `.env` at container start, not on `caddy reload`.
 
 The Cloudflare token and zone id, the URL template and the Turnstile hostname list are described in `.env.example`.
