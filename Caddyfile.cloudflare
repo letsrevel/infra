@@ -58,6 +58,22 @@
 	}
 }
 
+# User-uploaded media is served from the API origin, and file_server picks the
+# Content-Type from the file extension. Uploads must never render as a document
+# on this origin, whatever their type. Two layers:
+#  - everything outside the inline allowlist downloads instead of rendering.
+#    <img>, <video> and CSS ignore Content-Disposition, so embedded logos and
+#    images (SVG included) keep working;
+#  - a sandbox CSP stops script even for an inline type. PDFs are exempt: the
+#    browsers' built-in PDF viewers do not load in a sandboxed document.
+(user_media_headers) {
+	@media_download not path *.png *.jpg *.jpeg *.gif *.webp *.avif *.ico *.mp3 *.m4a *.ogg *.wav *.mp4 *.webm *.mov *.pdf
+	header @media_download Content-Disposition attachment
+	@media_not_pdf not path *.pdf
+	header @media_not_pdf Content-Security-Policy "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; sandbox"
+}
+
+
 # -------------------------------------------------------
 # Revel Frontend
 # -------------------------------------------------------
@@ -283,6 +299,8 @@
 			# Private caching (browser only, not CDN)
 			header Cache-Control "private, max-age=3600"
 
+			import user_media_headers
+
 			# Serve from media directory
 			# Note: handle_path strips /media/protected, so root must include /protected
 			root * /srv/revel_media/protected
@@ -293,6 +311,7 @@
 	# Public media files - served directly without validation
 	# (logos, cover-art, and other non-protected content)
 	handle_path /media/* {
+		import user_media_headers
 		root * /srv/revel_media
 		file_server
 		header Cache-Control "public, max-age=86400"
