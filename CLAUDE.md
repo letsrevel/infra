@@ -10,6 +10,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - On non-`main` branches, commit, push and open PRs freely (decided 2026-10-01). The only gate is merging: **merge only when the user explicitly approves it** (or they merge themselves)
 - The user handles file transfers to the server
 
+## Writing Style: ASD-STE100
+
+**Standing rule (decided 2026-11-20).** Write in ASD-STE100 Simplified Technical English wherever possible.
+This applies to chat replies, PR titles and descriptions, issues, and responses (for example, replies to review comments).
+
+- Keep each sentence short: 20 words or fewer for instructions, 25 words or fewer for descriptions.
+- Use the active voice and simple verb tenses.
+- Write one instruction in each sentence. Give the steps in the sequence that the reader does them.
+- Use one word for one meaning, and use the same term for the same thing every time.
+- Use articles ("a", "the"). Do not remove words only to make the text shorter.
+- Use vertical lists for sequences and for text that has many parts.
+
+Code, identifiers, commands, quoted text, log output, and technical names stay as they are.
+Do not rewrite existing documentation only to apply this rule.
+
 ## Working Environment
 
 **Local Development:** Commands are run locally on the developer's machine. To execute commands on the production server, use `ssh revel "cd infra && <command>"` format.
