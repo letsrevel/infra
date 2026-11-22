@@ -18,3 +18,20 @@ groups:
         annotations:
           summary: "Automatic refund failed"
           description: "An automatic refund failed or could not start. A buyer paid and did not get the money back. Refund by hand in Stripe. See docs/guides/observability.md in revel-backend."
+
+  - name: revel-accounts
+    rules:
+      - alert: AccountDeletionFailed
+        expr: |
+          sum(
+            count_over_time(
+              {service_name=~"web|celery_default", level="error"}
+                |~ "^account_deletion_failed$"
+              [10m]
+            )
+          ) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Account deletion failed"
+          description: "A confirmed account deletion failed for good. The account was reactivated and still holds its personal data. Check the error by user id in the logs and run the deletion again. See docs/engineering-notes.md (Account erasure) in revel-backend."
