@@ -140,6 +140,9 @@ with the process, the entry goes back to `idle` and its backup is deleted, so ge
 
 `PUSHOVER_USER_KEY` works the same way: the Pushover dashboard reset kills the old key at once. `stage PUSHOVER_USER_KEY`
 asks you to type `PUSHOVER RESET` once you have reset it, then for the new key; a failed `verify` keeps the new key.
+`CANARY_PASSWORD` is forward-only too: you change the canary account's password in the app before staging, so the old
+password is already dead. `stage CANARY_PASSWORD` (by name, not in a group or `--batch`) asks you to type `CANARY PASSWORD CHANGED`;
+a failed `verify` keeps the new password in `.env` and prints the recovery steps (`./deploy-rollout.sh roll canary` and `rotate.py verify canary`).
 `PUSHOVER_APP_TOKEN` is reversible: the old application keeps working until you delete it, so a failed `verify` rolls it back.
 
 ### Verify

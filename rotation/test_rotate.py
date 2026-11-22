@@ -2001,6 +2001,15 @@ class CodeRabbitRound3Tests(Base):
         self.assertTrue((self.tmp / entry["finalizing"]["backup"]).exists())
         self.assertEqual(rot.finalize(["STRIPE_WEBHOOK_SECRETS"], archive=False), 0)  # a re-run resumes
 
+    def test_canary_password_is_forward_only(self) -> None:
+        (self.tmp / ".env").write_text(ENV + "CANARY_PASSWORD=cp_old\n")
+        self.assertFalse(mf.MANIFEST["CANARY_PASSWORD"].reversible)
+        self.assertNotIn("CANARY_PASSWORD", r.select([], "thirdparty"))
+        rot = self.make(prompts=["cp_new"], files=[r.CANARY_CONFIRM_PHRASE], fail=lambda l: "ps --format" in l)
+        self.assertEqual(rot.stage(["CANARY_PASSWORD"]), 1)
+        self.assertEqual(self.env("CANARY_PASSWORD"), "cp_new")  # the app already has it: never restored
+        self.assertIn("NOT rolled back", "\n".join(self.out))
+
 
 if __name__ == "__main__":
     unittest.main()

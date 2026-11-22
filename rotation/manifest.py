@@ -121,8 +121,9 @@ _SECRETS: tuple[Secret, ...] = (
         "Pick a new key (8-128 chars, a-z A-Z 0-9 -). The frontend serves it as a key file for search engines."),
     _tp("INDEXNOW_TRIGGER_SECRET", ("frontend",), "Pick a new random value and paste it here."),
     _tp("CANARY_PASSWORD", ("canary",),
-        "FIRST change the canary account's password in the app (log in as it, or reset it in the Django admin), "
-        "then paste the same new password here."),
+        "FIRST change the canary account's password in the app (log in as it, or reset it in the Django admin): "
+        "the old password stops working, so this cannot be rolled back and a failed rollout keeps the new "
+        "password. Then paste the same new password here."),
     _tp("GOOGLE_WALLET_SERVICE_ACCOUNT_KEY_PATH", BACKEND,
         "GCP console -> IAM -> Service Accounts -> Keys -> Add key (JSON). Copy it into ./certs, chmod 644, "
         "then enter its container path (/app/certs/<file>).", THIRD_PARTY_FILE),
@@ -148,16 +149,18 @@ _BUNDLE_OF = {n: b for b, names in BUNDLES.items() for n in names}
 
 # Never part of a --group:
 # - TELEGRAM_BOT_TOKEN: ordering matters (it goes last, BotFather revokes the old token instantly).
+# - CANARY_PASSWORD: forward-only too (the app-side password is changed before staging); a --group --batch cannot hold it.
 # - PUSHOVER_USER_KEY: forward-only too (the reset kills the old key at once); a --group --batch cannot hold it.
 # - STRIPE_WEBHOOK_SECRET: never staged at all (see NOT_DIRECTLY_ROTATABLE).
-BY_NAME_ONLY = frozenset({"TELEGRAM_BOT_TOKEN", "PUSHOVER_USER_KEY", "STRIPE_WEBHOOK_SECRET"})
+BY_NAME_ONLY = frozenset({"TELEGRAM_BOT_TOKEN", "PUSHOVER_USER_KEY", "CANARY_PASSWORD", "STRIPE_WEBHOOK_SECRET"})
 
 # Name -> the secret to roll instead. Staging these directly would swap the value with no grace period.
 NOT_DIRECTLY_ROTATABLE = {"STRIPE_WEBHOOK_SECRET": "STRIPE_WEBHOOK_SECRETS"}
 
-# The provider kills the old value the moment the operator revokes it (BotFather /revoke, Pushover user key reset).
+# The old value stops working the moment the operator revokes it (BotFather /revoke, Pushover user key reset,
+# the canary account's password changed in the app).
 # PUSHOVER_APP_TOKEN is not here: the old application stays usable until it is deleted.
-NON_REVERSIBLE = frozenset({"TELEGRAM_BOT_TOKEN", "PUSHOVER_USER_KEY"})
+NON_REVERSIBLE = frozenset({"TELEGRAM_BOT_TOKEN", "PUSHOVER_USER_KEY", "CANARY_PASSWORD"})
 # A key without a password is legitimate.
 OPTIONAL_MEMBERS = frozenset({"APPLE_WALLET_KEY_PASSWORD"})
 
