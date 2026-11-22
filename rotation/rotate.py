@@ -599,12 +599,16 @@ class Rotator:
                 self.out(f"ERROR: {e}")
             if not ok:
                 failures += 1
-                for n in pending:  # one failing rollback must not leave the others staged
+                units: dict[str, list[str]] = {}
+                for n in pending:
+                    units.setdefault(MANIFEST[n].bundle or n, []).append(n)
+                for unit in units.values():  # one failing rollback must not leave the others staged
                     try:
-                        self.rollback(n, reason="batch verify failed")
+                        self.rollback_unit(unit, reason="batch verify failed")
                     except RotationError as e:
-                        self.out(f"[{n}] ERROR: {e}")
-                        self.out(f"[{n}] stays staged (or pending): fix the cause, then run `rollback {retry_name(n)}`")
+                        self.out(f"[{', '.join(unit)}] ERROR: {e}")
+                        self.out(f"[{', '.join(unit)}] stays staged (or pending): fix the cause, then run "
+                                 f"`rollback {retry_name(unit[0])}`")
                         failures += 1
         return failures
 
@@ -777,43 +781,52 @@ class Rotator:
             raise RotationError("verification failed; forward-only secret kept (see recovery steps above)")
         if not ok:
             self.out("verification failed: rolling back")
-            stuck: list[str] = []
-            for s, _ in plans:  # a bundle member that cannot roll back must not strand the others
-                try:
-                    self.rollback(s.name, reason="verify failed")
-                except RotationError as e:
-                    self.out(f"[{s.name}] ERROR: {e}")
-                    stuck.append(s.name)
-            if stuck:
-                raise RotationError(f"verification failed and the rollback of {', '.join(stuck)} did not complete: "
-                                    f"they stay staged (or pending), re-run `rollback {' '.join(dict.fromkeys(retry_name(n) for n in stuck))}`")
+            try:  # a bundle is rolled back as one unit: never a mismatched pair between two restores
+                self.rollback_unit([s.name for s, _ in plans], reason="verify failed")
+            except RotationError as e:
+                self.out(f"ERROR: {e}")
+                names = [s.name for s, _ in plans]
+                raise RotationError(f"verification failed and the rollback of {', '.join(names)} did not complete: "
+                                    f"they stay staged (or pending), re-run `rollback {retry_name(names[0])}`") from None
             raise RotationError("verification failed, rolled back")
 
     # ---- rollback
     def rollback(self, name: str, reason: str = "requested") -> None:
-        """Restore the secret's previous values. A key that was ever primary or introduced is never
-        removed: rolling back phase 2 keeps the new key in the fallbacks."""
-        entry = self.load_state()["secrets"].get(name, {})
-        next_step(entry.get("step", "idle"), "rollback")
-        if entry.get("finalizing"):
-            raise RotationError(f"a finalize of {name} was interrupted: run `finalize {name}` again first")
-        s = MANIFEST[name]
-        if not s.reversible and entry.get("step") == "pending":
-            self._resolve_pending_forward_only(name, s, entry)
-            return
-        if not s.reversible:
-            raise RotationError(f"{name} cannot be rolled back: the old value was revoked at the provider "
-                                "(BotFather /revoke). Fix forward: re-issue a token, put it in .env, "
-                                f"`./deploy-rollout.sh roll {' '.join(s.services)}`")
+        self.rollback_unit([name], reason)
+
+    def rollback_unit(self, names: list[str], reason: str = "requested") -> None:
+        """Restore the previous values of one secret, or of all members of one bundle together: one .env write,
+        one roll, so the services never run a mismatched pair. A key that was ever primary or introduced is
+        never removed: rolling back phase 2 keeps the new key in the fallbacks."""
+        name = names[0]
+        label, retry = ", ".join(names), retry_name(name)
+        state = self.load_state()["secrets"]
+        entries = {n: state.get(n, {}) for n in names}
+        for n in names:
+            next_step(entries[n].get("step", "idle"), "rollback")
+            if entries[n].get("finalizing"):
+                raise RotationError(f"a finalize of {n} was interrupted: run `finalize {n}` again first")
+        entry, s = entries[name], MANIFEST[name]
+        if len(names) == 1:  # forward-only and two-phase secrets are never part of a bundle
+            if not s.reversible and entry.get("step") == "pending":
+                self._resolve_pending_forward_only(name, s, entry)
+                return
+            if not s.reversible:
+                raise RotationError(f"{name} cannot be rolled back: the old value was revoked at the provider "
+                                    "(BotFather /revoke). Fix forward: re-issue a token, put it in .env, "
+                                    f"`./deploy-rollout.sh roll {' '.join(s.services)}`")
+            if s.kind == mf.GENERATED_WITH_FALLBACK and entry.get("phase") == 1 and entry.get("ever_primary"):
+                raise RotationError("the new key has been primary: it stays in the fallbacks. Re-run `stage` to "
+                                    "promote it again, or `migrate` once phase 2 is complete")
         fallback = s.kind == mf.GENERATED_WITH_FALLBACK
-        if fallback and entry.get("phase") == 1 and entry.get("ever_primary"):
-            raise RotationError("the new key has been primary: it stays in the fallbacks. Re-run `stage` to "
-                                "promote it again, or `migrate` once phase 2 is complete")
-        old_env = (self.base / entry["backup"]).read_text(encoding="utf-8")
         env = self.env_text()
-        for var in entry["vars"]:
-            env = set_env(env, var, get_env(old_env, var) or "")
-        old_pw = get_env(old_env, name)
+        old_pw = None
+        for n in names:
+            old_env = (self.base / entries[n]["backup"]).read_text(encoding="utf-8")
+            for var in entries[n]["vars"]:
+                env = set_env(env, var, get_env(old_env, var) or "")
+            if n == name:
+                old_pw = get_env(old_env, name)
         try:
             if s.kind == mf.DB_PASSWORD and old_pw:
                 self._alter_role(entry["db_user"], entry["db_name"], old_pw)
@@ -826,34 +839,41 @@ class Rotator:
             raise RotationError(
                 f"{name}: the live credential is still the NEW one, and .env, the state and the running "
                 f"services were left unchanged (they match it). Fix the service, then re-run "
-                f"`rollback {retry_name(name)}`") from None
+                f"`rollback {retry}`") from None
         write_atomic(self.env_path, env)
         started = self.now()
+        rolled = [n for n in names if entries[n].get("roll", True)]
+        services = sorted({x for n in rolled for x in MANIFEST[n].services}, key=_svc_order)
+        recreate = sorted({x for n in rolled for x in entries[n].get("recreate") or []})
         try:
-            if entry.get("roll", True):
-                self.roll(list(s.services), entry.get("recreate"))
+            if rolled:
+                self.roll(services, recreate)
         except RotationError as e:
-            # .env already holds the old value but the services may still run the new one. Keep the state
+            # .env already holds the old values but the services may still run the new ones. Keep the state
             # "staged" (or "pending") and every backup so `rollback` can be re-run: each step above is idempotent (the
             # credential reset to the old value, .env rewritten from the same backup, the roll itself),
             # and the new key file is only deleted after a successful roll.
-            self.out(f"[{name}] ERROR: re-roll after rollback failed: {e}")
+            self.out(f"[{label}] ERROR: re-roll after rollback failed: {e}")
             raise RotationError(
-                f"{name}: .env holds the OLD value but the services may still run the NEW one, and the state "
-                f"stays staged (or pending) with its backup. Re-run `rollback {retry_name(name)}` once the rollout works") from None
-        if entry.get("new_key_file"):
-            Path(entry["new_key_file"]).unlink(missing_ok=True)
-        if not self.verify(list(s.services) + list(entry.get("recreate") or []), started):
-            self.out(f"[{name}] WARNING: verification after rollback failed: check `rotate.py verify`")
+                f"{label}: .env holds the OLD value but the services may still run the NEW one, and the state "
+                f"stays staged (or pending) with its backup. Re-run `rollback {retry}` once the rollout works") from None
+        for n in names:
+            if entries[n].get("new_key_file"):
+                Path(entries[n]["new_key_file"]).unlink(missing_ok=True)
+        every = sorted({x for n in names for x in MANIFEST[n].services}, key=_svc_order)
+        if not self.verify(every + sorted({x for n in names for x in entries[n].get("recreate") or []}), started):
+            self.out(f"[{label}] WARNING: verification after rollback failed: check `rotate.py verify`")
         if fallback and entry.get("phase") == 2:
             # Back to "introduced": old key primary, new key kept; its backup stays until finalize.
             self.update_state(name, step="staged", phase=1, backup=entry["b1"], vars=[s.fallback_var],
                               grace_end=None)
             self.out(f"[{name}] rolled back to phase 1 ({reason}); the new key stays in {s.fallback_var}")
             return
-        self.update_state(name, step="idle", backups=[], rolled_back_reason=reason)
-        self._unlink_unreferenced(entry.get("backups", [entry["backup"]]))
-        self.out(f"[{name}] rolled back ({reason})")
+        for n in names:
+            self.update_state(n, step="idle", backups=[], rolled_back_reason=reason)
+        for n in names:
+            self._unlink_unreferenced(entries[n].get("backups", [entries[n]["backup"]]))
+            self.out(f"[{n}] rolled back ({reason})")
 
     def _resolve_pending_forward_only(self, name: str, s: mf.Secret, entry: dict[str, Any]) -> None:
         """Clear the journal of a forward-only secret whose `stage` was killed. The old value is revoked at
@@ -1252,13 +1272,16 @@ def main(argv: list[str] | None = None, rotator: Rotator | None = None) -> int:
             names = select([m for n in args.names for m in mf.BUNDLES.get(n, (n,))], None)
             failed = 0
             steps = {n: rotator.step_of(n) for n in names}
-            for n in names:  # keep going: a stuck member must not strand the rest of a bundle
+            units: dict[str, list[str]] = {}
+            for n in names:  # a bundle is rolled back as one unit; keep going: a stuck unit must not strand the rest
                 bundle = MANIFEST[n].bundle
                 if bundle and steps[n] == "idle" and any(steps[m] != "idle" for m in mf.BUNDLES[bundle]):
                     rotator.out(f"[{n}] already rolled back, skipping")  # retry of a partially rolled-back bundle
                     continue
+                units.setdefault(bundle or n, []).append(n)
+            for unit in units.values():
                 try:
-                    rotator.rollback(n)
+                    rotator.rollback_unit(unit)
                 except RotationError as e:
                     print(f"error: {e}", file=sys.stderr)
                     failed += 1

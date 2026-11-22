@@ -1055,45 +1055,55 @@ class ReviewRound5Tests(Base):
         self.assertEqual((self.env("AWS_ACCESS_KEY_ID"), self.env("AWS_SECRET_ACCESS_KEY")), ("akid_old", "aws_old"))
         self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
 
-    def _half_rolled_back_aws(self):
+    def _half_rolled_back_aws(self, **kw):
+        """A rollback killed between the per-member state updates: the secret member is idle, the ID still staged."""
         (self.tmp / ".env").write_text(ENV + "AWS_ACCESS_KEY_ID=akid_old\nAWS_SECRET_ACCESS_KEY=aws_old\n")
-        seen = {"on": False, "n": 0}
-
-        def fail(line: str) -> bool:
-            if seen["on"] and "deploy-rollout.sh" in line:
-                seen["n"] += 1
-                return seen["n"] == 1  # only the first member's recovery roll fails
-            return False
-
-        rot = self.make(prompts=["akid_new", "aws_new"], fail=fail)
+        rot = self.make(prompts=["akid_new", "aws_new"], **kw)
         rot.stage(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"])
-        seen["on"] = True
+        rot.update_state("AWS_SECRET_ACCESS_KEY", step="idle")
+        (self.tmp / ".env").write_text(r.set_env((self.tmp / ".env").read_text(), "AWS_SECRET_ACCESS_KEY", "aws_old"))
         return rot
 
     def test_retrying_a_bundle_skips_members_already_rolled_back(self) -> None:
         rot = self._half_rolled_back_aws()
         cli = ["--dir", str(self.tmp), "rollback", "aws"]
-        self.assertEqual(r.main(cli, rotator=rot), 1)
-        self.assertEqual(rot.step_of("AWS_ACCESS_KEY_ID"), "staged")
-        self.assertEqual(rot.step_of("AWS_SECRET_ACCESS_KEY"), "idle")
         self.assertEqual(r.main(cli, rotator=rot), 0)
         self.assertTrue(any("[AWS_SECRET_ACCESS_KEY] already rolled back, skipping" in o for o in self.out))
         self.assertEqual(rot.step_of("AWS_ACCESS_KEY_ID"), "idle")
+        self.assertEqual(rot.step_of("AWS_SECRET_ACCESS_KEY"), "idle")
         self.assertEqual(self.env("AWS_ACCESS_KEY_ID"), "akid_old")
 
     def test_rollback_of_an_all_idle_bundle_is_still_refused(self) -> None:
         rot = self._half_rolled_back_aws()
-        r.main(["--dir", str(self.tmp), "rollback", "aws"], rotator=rot)
         r.main(["--dir", str(self.tmp), "rollback", "aws"], rotator=rot)
         self.assertEqual(r.main(["--dir", str(self.tmp), "rollback", "aws"], rotator=rot), 1)
 
     def test_retry_hint_names_the_bundle_not_the_member(self) -> None:
         self.assertEqual(r.retry_name("AWS_SECRET_ACCESS_KEY"), "aws")
         self.assertEqual(r.retry_name("STRIPE_SECRET_KEY"), "STRIPE_SECRET_KEY")
-        rot = self._half_rolled_back_aws()
+        failing = [False]
+        (self.tmp / ".env").write_text(ENV + "AWS_ACCESS_KEY_ID=akid_old\nAWS_SECRET_ACCESS_KEY=aws_old\n")
+        rot = self.make(prompts=["akid_new", "aws_new"], fail=lambda l: failing[0] and "deploy-rollout.sh" in l)
+        rot.stage(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"])
+        failing[0] = True
         with self.assertRaises(r.RotationError) as cm:
-            rot.rollback("AWS_ACCESS_KEY_ID")
+            rot.rollback_unit(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"])
         self.assertIn("`rollback aws`", str(cm.exception))
+
+    def test_bundle_rollback_never_rolls_a_mismatched_pair(self) -> None:
+        (self.tmp / ".env").write_text(ENV + "AWS_ACCESS_KEY_ID=akid_old\nAWS_SECRET_ACCESS_KEY=aws_old\n")
+        pairs: list[tuple[str | None, str | None]] = []
+
+        def on_roll(_line: str) -> None:
+            text = (self.tmp / ".env").read_text()
+            pairs.append((r.get_env(text, "AWS_ACCESS_KEY_ID"), r.get_env(text, "AWS_SECRET_ACCESS_KEY")))
+
+        rot = self.make(prompts=["akid_new", "aws_new"], on_roll=on_roll,
+                        fail=lambda line: line.endswith("manage.py check"))
+        self.assertEqual(rot.stage(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]), 1)
+        self.assertEqual(pairs, [("akid_new", "aws_new"), ("akid_old", "aws_old")])  # one roll per direction
+        self.assertEqual(rot.step_of("AWS_ACCESS_KEY_ID"), "idle")
+        self.assertEqual(rot.step_of("AWS_SECRET_ACCESS_KEY"), "idle")
 
     def test_failed_env_write_in_finalize_leaves_no_plaintext_backup(self) -> None:
         rot = self.make()
