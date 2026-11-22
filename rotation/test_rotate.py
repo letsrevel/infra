@@ -1396,7 +1396,7 @@ class FinalizeRecoveryTests(Base):
         self.fin_backups.clear()  # from here on, only the backups that finalize makes
         return rot
 
-    def killed_before_the_state_update(self, rot: r.Rotator, name: str) -> None:
+    def killed_before_the_state_update(self, rot: r.Rotator, name: str, archive: bool = True) -> None:
         """The on-disk result of a SIGKILL after the .env edit, the roll and the cleanup, before `finalized`."""
         real = rot.update_state
 
@@ -1406,7 +1406,10 @@ class FinalizeRecoveryTests(Base):
             return real(n, **fields)
 
         with mock.patch.object(rot, "update_state", update), self.assertRaises(KeyboardInterrupt):
-            rot.finalize([name])
+            rot.finalize([name], archive=archive)
+
+    def archived_inputs(self) -> list[str]:
+        return [c.input for c in self.runner.calls if c.argv[0] == "age" and (c.input or "").startswith("# retired")]
 
     def test_failed_verify_deletes_the_finalize_backup(self) -> None:
         rot = self.staged_salt(fail=lambda line: self.failing and line.endswith("manage.py check"))
@@ -1442,8 +1445,20 @@ class FinalizeRecoveryTests(Base):
         self.assertEqual(r.get_env(backup.read_text(), "SALT_KEY_FALLBACKS"), "oldsalt+/=")
         self.assertEqual(self.env("SALT_KEY_FALLBACKS"), "")
         text = "\n".join(self.out)
-        self.assertIn(f"the old values are in {backup.name}; copy them back into .env, delete {backup.name}", text)
+        self.assertIn(f"the old values are kept in {backup.name} (recorded in state.json; do NOT delete it)", text)
+        self.assertIn("run `finalize SALT_KEY` again: it resumes from that file", text)
         self.assertEqual(rot.step_of("SALT_KEY"), "migrated")
+        self.out.clear()
+        rot.status()  # the kept copy is referenced: no "delete it" warning, and the row says what to do
+        text = "\n".join(self.out)
+        self.assertNotIn(f"WARNING: {backup.name}", text)
+        self.assertIn("migrated (phase 2) (finalize interrupted: run finalize)", text)
+        self.failing = False
+        self.assertEqual(rot.finalize(["SALT_KEY"]), 0)  # resumes from the kept copy
+        self.assertEqual(self.env("SALT_KEY_FALLBACKS"), "")
+        self.assertIn("SALT_KEY=oldsalt+/=", self.archived_inputs()[-1])
+        self.assertFalse(backup.exists())
+        self.assertEqual(rot.step_of("SALT_KEY"), "finalized")
 
     def test_rerun_after_a_killed_list_finalize_completes(self) -> None:
         rot = self.make(prompts=["whsec_new1,whsec_new2"])
@@ -1453,11 +1468,38 @@ class FinalizeRecoveryTests(Base):
         self.assertEqual(self.env("STRIPE_WEBHOOK_SECRETS"), "whsec_new1,whsec_new2")
         self.assertEqual(rot.step_of("STRIPE_WEBHOOK_SECRETS"), "staged")
         rot = self.make()
+        with self.assertRaisesRegex(r.RotationError, "finalize of STRIPE_WEBHOOK_SECRETS was interrupted"):
+            rot.rollback("STRIPE_WEBHOOK_SECRETS")  # it would restore the stage backup over a half-done finalize
         self.assertEqual(rot.finalize(["STRIPE_WEBHOOK_SECRETS"]), 0)
         self.assertEqual(self.env("STRIPE_WEBHOOK_SECRETS"), "whsec_new1,whsec_new2")
         self.assertEqual(rot.step_of("STRIPE_WEBHOOK_SECRETS"), "finalized")
-        self.assertIn("no retired value left to archive", "\n".join(self.out))
+        self.assertIn("resuming an interrupted finalize", "\n".join(self.out))
+        self.assertIn("STRIPE_WEBHOOK_SECRETS=whsec_old", self.archived_inputs()[-1])
         self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
+
+    def test_retry_with_archive_archives_what_a_killed_no_archive_run_dropped(self) -> None:
+        rot = self.make(prompts=["whsec_new1"])
+        rot.stage(["STRIPE_WEBHOOK_SECRETS"])
+        self.advance(hours=25)
+        self.killed_before_the_state_update(rot, "STRIPE_WEBHOOK_SECRETS", archive=False)
+        self.assertEqual(self.env("STRIPE_WEBHOOK_SECRETS"), "whsec_new1")  # the old item is gone from .env
+        rot = self.make()
+        self.assertEqual(rot.finalize(["STRIPE_WEBHOOK_SECRETS"]), 0)
+        self.assertIn("STRIPE_WEBHOOK_SECRETS=whsec_old", self.archived_inputs()[-1])
+        self.assertEqual(rot.step_of("STRIPE_WEBHOOK_SECRETS"), "finalized")
+
+    def test_retry_refuses_a_list_replaced_by_hand_after_the_kill(self) -> None:
+        rot = self.make(prompts=["whsec_new1,whsec_new2"])
+        rot.stage(["STRIPE_WEBHOOK_SECRETS"])
+        self.advance(hours=25)
+        self.killed_before_the_state_update(rot, "STRIPE_WEBHOOK_SECRETS")
+        text = (self.tmp / ".env").read_text()
+        (self.tmp / ".env").write_text(r.set_env(text, "STRIPE_WEBHOOK_SECRETS", "whsec_other,whsec_new2"))
+        rot = self.make()
+        self.assertEqual(rot.finalize(["STRIPE_WEBHOOK_SECRETS"]), 1)
+        self.assertIn("STRIPE_WEBHOOK_SECRETS was edited since the interrupted finalize", "\n".join(self.out))
+        self.assertEqual(self.env("STRIPE_WEBHOOK_SECRETS"), "whsec_other,whsec_new2")
+        self.assertEqual(rot.step_of("STRIPE_WEBHOOK_SECRETS"), "staged")
 
     def test_list_with_the_new_items_removed_by_hand_is_still_refused(self) -> None:
         rot = self.make(prompts=["whsec_new1"])  # old_count == new_count == 1
@@ -1568,6 +1610,22 @@ class BatchInterruptTests(Base):
         rot.rollback("STRIPE_WEBHOOK_SECRETS")
         self.assertEqual(self.env("STRIPE_SECRET_KEY"), "sk_old")
         self.assertEqual(self.env("STRIPE_WEBHOOK_SECRETS"), "whsec_old")
+
+    def test_interrupt_right_after_a_commit_still_names_that_unit(self) -> None:
+        rot = self.make(prompts=["sk_new", "whsec_new"])
+        rot.stage(["STRIPE_SECRET_KEY"])  # staged before the batch: not this batch's to report
+        real = rot._stage_group
+
+        def commit_then_ctrl_c(secs, roll):
+            real(secs, roll)
+            raise KeyboardInterrupt  # after _commit saved "staged", before the batch list was updated
+
+        self.out.clear()
+        with mock.patch.object(rot, "_stage_group", commit_then_ctrl_c), self.assertRaises(KeyboardInterrupt):
+            rot.stage(["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRETS"], batch=True)
+        line = next(x for x in self.out if x.startswith("INTERRUPTED"))
+        self.assertIn("INTERRUPTED: STRIPE_WEBHOOK_SECRETS staged by this --batch", line)
+        self.assertNotIn("STRIPE_SECRET_KEY", line)
 
     def test_interrupt_before_anything_was_staged_says_nothing(self) -> None:
         rot = self.make()

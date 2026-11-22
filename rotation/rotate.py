@@ -516,24 +516,29 @@ class Rotator:
             raise RotationError("forward-only secrets (TELEGRAM_BOT_TOKEN) are staged by name, without --batch")
         if any(MANIFEST[n].kind == mf.GENERATED_WITH_FALLBACK for n in names):
             self.require_fallback_support()
-        pending: list[str] = []
+        before = self.load_state()["secrets"] if batch else {}
         try:
-            return self._stage_units(names, batch, pending)
+            return self._stage_units(names, batch)
         except BaseException:
-            # Ctrl-C, or an OSError such as a failed state write: say what a batch left staged but not verified.
-            if pending:
+            # Ctrl-C, or an OSError such as a failed state write. The state on disk, not an in-memory list, says
+            # which units this batch staged (a unit can be saved as staged just before the interruption).
+            if batch:
                 try:
-                    left = [n for n in pending if self.step_of(n) != "idle"]
+                    now = self.load_state()["secrets"]
+                    left = [n for n in names if MANIFEST[n].kind != mf.GENERATED_WITH_FALLBACK
+                            and now.get(n, {}).get("step") == "staged" and now.get(n) != before.get(n)]
                 except Exception:
-                    left = pending
+                    left = []
+                    self.out("INTERRUPTED: check `rotate.py status` for secrets staged by this --batch")
                 if left:
                     retry = " ".join(dict.fromkeys(retry_name(n) for n in left))
                     self.out(f"INTERRUPTED: {', '.join(left)} staged by this --batch but not (all) rolled or "
                              f"verified: undo with `rollback {retry}`, then stage again")
             raise
 
-    def _stage_units(self, names: list[str], batch: bool, pending: list[str]) -> int:
+    def _stage_units(self, names: list[str], batch: bool) -> int:
         failures = 0
+        pending: list[str] = []
         for unit in self._units(names):
             fallback = MANIFEST[unit[0]].kind == mf.GENERATED_WITH_FALLBACK  # two-phase: always rolls itself
             try:
@@ -745,6 +750,8 @@ class Rotator:
         removed: rolling back phase 2 keeps the new key in the fallbacks."""
         entry = self.load_state()["secrets"].get(name, {})
         next_step(entry.get("step", "idle"), "rollback")
+        if entry.get("finalizing"):
+            raise RotationError(f"a finalize of {name} was interrupted: run `finalize {name}` again first")
         s = MANIFEST[name]
         if not s.reversible and entry.get("step") == "pending":
             self._resolve_pending_forward_only(name, s, entry)
@@ -916,14 +923,6 @@ class Rotator:
                 failures += 1
         return failures
 
-    def _list_before_stage(self, entry: dict[str, Any], name: str) -> list[str]:
-        """The list items that stage found (seeded from the legacy single secret when the list was empty)."""
-        try:
-            old_env = (self.base / entry["backup"]).read_text(encoding="utf-8")
-        except OSError as e:
-            raise RotationError(f"stage backup {entry['backup']} cannot be read ({e.strerror}): fix by hand") from None
-        return csv_split(get_env(old_env, name)) or csv_split(get_env(old_env, "STRIPE_WEBHOOK_SECRET"))
-
     def _finalize_one(self, name: str, force: bool, recipient: str) -> None:
         s, entry = MANIFEST[name], self.load_state()["secrets"].get(name, {})
         step = entry.get("step", "idle")
@@ -934,54 +933,78 @@ class Rotator:
         if grace_end and self.now() < datetime.fromisoformat(grace_end) and not force:
             raise RotationError(f"grace window open until {grace_end}; use --force to override")
         env = self.env_text()
+        # Finalize journal: before the .env edit, the pre-edit copy of .env is recorded in the entry. A finalize
+        # that was killed (or could not restore .env) is resumed from that copy, so nothing is inferred from .env.
+        journal = entry.get("finalizing")
+        plan_env = env
+        if journal:
+            try:
+                plan_env = (self.base / journal["backup"]).read_text(encoding="utf-8")
+            except OSError as e:
+                raise RotationError(f"an interrupted finalize recorded {journal['backup']}, which cannot be read "
+                                    f"({e.strerror}): fix by hand") from None
+            self.out(f"[{name}] resuming an interrupted finalize from {journal['backup']}")
         edits: dict[str, str] = {}
         retired: list[str] = []
         key_files: list[str] = []
         if s.kind == mf.GENERATED_WITH_FALLBACK:
-            retired = [f"{name}={v}" for v in csv_split(get_env(env, s.fallback_var))]
+            retired = [f"{name}={v}" for v in csv_split(get_env(plan_env, s.fallback_var))]
             edits = {s.fallback_var: ""}
         elif s.kind == mf.GENERATED_FILE_WITH_INACTIVE:
             key_files = entry["retired_paths"]
-            inactive = csv_split(get_env(env, s.fallback_var))
             for p in key_files:
-                if p not in inactive and not self.host_path(p).exists():
-                    continue  # an earlier finalize archived, dropped and deleted it, then was killed
+                if journal and journal.get("archived") and not self.host_path(p).exists():
+                    continue  # the interrupted run archived it, then deleted it
                 try:
                     data = self.confined_key_path(p).read_bytes()
                 except OSError as e:
                     raise RotationError(f"retired key {p} cannot be read ({e.strerror}): nothing was changed") from None
                 retired.append(f"OIDC_SIGNING_KEY_FILE:{p}={base64.b64encode(data).decode()}")
-            edits = {s.fallback_var: ",".join(csv_drop(inactive, key_files))}
+            edits = {s.fallback_var: ",".join(csv_drop(csv_split(get_env(plan_env, s.fallback_var)), key_files))}
         elif s.kind == mf.LIST_APPEND:
-            items, n_old = csv_split(get_env(env, name)), entry["old_count"]
-            if len(items) == entry["new_count"] and not set(items) & set(self._list_before_stage(entry, name)):
-                n_old = 0  # an earlier finalize already dropped the old items, then was killed: nothing to drop
-            elif len(items) != n_old + entry["new_count"]:
+            items, n_old = csv_split(get_env(plan_env, name)), entry["old_count"]
+            if len(items) != n_old + entry["new_count"]:
                 raise RotationError(f"{name} was edited since staging; fix by hand")
             retired = [f"{name}={v}" for v in items[:n_old]]
             edits = {name: ",".join(items[n_old:])}
         else:  # one-shot kinds: the retired value is the pre-rotation one held in the backup
             old_env = (self.base / entry["backup"]).read_text(encoding="utf-8")
             retired = [f"{v}={get_env(old_env, v)}" for v in entry["vars"] if get_env(old_env, v)]
+        if journal:  # .env must hold either the pre-edit or the edited value, nothing else
+            for var, val in edits.items():
+                if get_env(env, var) not in (get_env(plan_env, var), val):
+                    raise RotationError(f"{var} was edited since the interrupted finalize; fix by hand "
+                                        f"(the pre-finalize values are in {journal['backup']})")
         # 1. Archive FIRST: a failure here leaves .env, the state and the backups untouched.
-        if not retired:  # e.g. a re-run after a killed finalize: the first run archived them already
-            self.out(f"[{name}] no retired value left to archive")
-        elif recipient:
+        if recipient:
             where = self.archive(recipient, name, retired)
             self.out(f"[{name}] archived {len(retired)} retired value(s) to {where.relative_to(self.base)}")
         else:
             self.out(f"[{name}] --no-archive: {len(retired)} retired value(s) were NOT archived")
-        # 2. Edit .env, roll, verify.
+        # 2. Journal, edit .env, roll, verify.
+        fin_backup: Path | None = None
         if edits:
-            fin_backup = backup_file(self.env_path, self.now())
-            started = self.now()
+            if journal:
+                fin_backup = self.base / journal["backup"]
+            else:
+                fin_backup = backup_file(self.env_path, self.now())
+            try:
+                self.update_state(name, finalizing={"backup": fin_backup.name,
+                                                    "archived": bool(recipient) or bool(journal and journal.get("archived"))})
+            except BaseException:
+                if not journal:  # the journal was not saved: nothing refers to the plaintext copy
+                    fin_backup.unlink(missing_ok=True)
+                raise
             try:
                 for var, val in edits.items():
                     env = set_env(env, var, val)
                 write_atomic(self.env_path, env)
             except BaseException:
-                fin_backup.unlink(missing_ok=True)  # plaintext copy no longer needed
+                if not journal:  # .env is unchanged: undo the journal and drop the plaintext copy
+                    self.update_state(name, finalizing=None)
+                    fin_backup.unlink(missing_ok=True)
                 raise
+            started = self.now()
             ok = False
             try:
                 self.roll(list(s.services))
@@ -994,11 +1017,12 @@ class Rotator:
                     for var in edits:
                         restored = set_env(restored, var, get_env(fb_text, var) or "")
                     write_atomic(self.env_path, restored)
-                except Exception as e:  # keep the backup: it is now the only copy of the old values
+                except Exception as e:  # keep the backup and the journal: they are the only copy of the old values
                     raise RotationError(
-                        f"verification failed and .env could not be restored ({e}): the old values are in "
-                        f"{fin_backup.name}; copy them back into .env, delete {fin_backup.name}, then re-roll "
-                        f"with `./deploy-rollout.sh roll {' '.join(s.services)}`") from None
+                        f"verification failed and .env could not be restored ({e}): the old values are kept in "
+                        f"{fin_backup.name} (recorded in state.json; do NOT delete it). Fix the cause, then run "
+                        f"`finalize {name}` again: it resumes from that file.") from None
+                self.update_state(name, finalizing=None)
                 fin_backup.unlink(missing_ok=True)  # plaintext copy no longer needed
                 try:
                     self.roll(list(s.services))
@@ -1007,13 +1031,14 @@ class Rotator:
                         ".env was restored but the services are out of sync with it: re-roll with "
                         f"`./deploy-rollout.sh roll {' '.join(s.services)}` before doing anything else") from None
                 raise RotationError("verification failed after dropping the old values; restored them")
-            fin_backup.unlink(missing_ok=True)
         # 3. Clean up: only now are the retired values safe on disk elsewhere.
         if recipient:
             for p in key_files:
                 self.delete_retired_key(p)
-        self.update_state(name, step="finalized", finalized_at=self.now().isoformat(), backups=[])
+        self.update_state(name, step="finalized", finalized_at=self.now().isoformat(), backups=[], finalizing=None)
         self._unlink_unreferenced(entry.get("backups", [entry["backup"]]))
+        if fin_backup is not None:
+            fin_backup.unlink(missing_ok=True)
         self.out(f"[{name}] finalized")
 
     # ---- reporting
@@ -1026,6 +1051,8 @@ class Rotator:
             step = e.get("step", "idle")
             step = "pending (interrupted: run rollback)" if step == "pending" else \
                 step + (f" (phase {e['phase']})" if e.get("phase") else "")
+            if e.get("finalizing"):
+                step += " (finalize interrupted: run finalize)"
             rows.append((n, kind, "set" if get_env(env, n) else "unset", step,
                          (e.get("grace_end") or "-")[:19]))
         return rows
@@ -1043,11 +1070,12 @@ class Rotator:
         self.table(("SECRET", "KIND", "ENV", "STEP", "GRACE END"), self.rows())
         for f in self.unreferenced_backups():
             self.out(f"WARNING: {f} is not referenced by rotation/state.json and holds .env values (secrets) in "
-                     "plaintext (a killed stage or finalize, a failed restore, or setup.sh). Check it, then delete it.")
+                     "plaintext (a stage or finalize killed before it recorded the file, or setup.sh). No rotation "
+                     "step needs it. Keep it while you recover .env by hand from it; delete it after that.")
 
     def unreferenced_backups(self) -> list[str]:
         refs = {b for e in self.load_state()["secrets"].values() if e.get("step") in ("pending", "staged", "migrated")
-                for b in [e.get("backup"), *e.get("backups", [])] if b}  # live entries only, as in _unlink_unreferenced
+                for b in [e.get("backup"), (e.get("finalizing") or {}).get("backup"), *e.get("backups", [])] if b}
         return sorted(p.name for p in self.base.glob(f"{self.env_path.name}.bak.*") if p.name not in refs)
 
     def check(self, examples: list[Path]) -> int:
