@@ -23,7 +23,10 @@ certs/*
 *.log
 .idea/
 # Secret rotation (local state, archives of retired secrets, env backups)
-rotation/state.json
-rotation/archive/
+**/rotation/state.json
+**/rotation/state.lock
+**/rotation/archive/
 .env.bak.*
+..env.tmp.*
+.state.json.tmp.*
 __pycache__/

@@ -1705,3 +1705,32 @@ class DurabilityTests(Base):
         with self.assertRaises(r.RotationError):
             rot.archive("age1abc", "SALT_KEY", ["SALT_KEY=v"])
         self.assertEqual(list((self.tmp / "rotation" / "archive").iterdir()), [])
+
+
+class LockTests(Base):
+    def test_a_second_mutating_command_fails_while_the_lock_is_held(self) -> None:
+        rot = self.make()
+        with rot.lock():
+            with self.assertRaisesRegex(r.RotationError, "another rotate.py command"):
+                with self.make().lock():
+                    pass
+        with self.make().lock():  # released with the first holder
+            pass
+
+    def test_main_takes_the_lock_for_mutating_commands_only(self) -> None:
+        holder = self.make()
+        cli = ["--dir", str(self.tmp)]
+        with holder.lock():
+            rot = self.make()
+            self.assertEqual(r.main([*cli, "rollback", "STRIPE_SECRET_KEY"], rotator=rot), 1)
+            self.assertEqual(r.main([*cli, "stage", "STRIPE_SECRET_KEY"], rotator=rot), 1)
+            self.assertEqual(r.main([*cli, "migrate"], rotator=rot), 1)
+            self.assertEqual(r.main([*cli, "finalize", "STRIPE_SECRET_KEY"], rotator=rot), 1)
+            self.assertEqual(self.runner.calls, [])  # nothing ran
+            self.assertEqual(r.main([*cli, "status"], rotator=rot), 0)  # read-only commands do not wait
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):  # lock free again: the command runs and fails on its own merits
+            self.assertEqual(r.main([*cli, "rollback", "STRIPE_SECRET_KEY"], rotator=self.make()), 1)
+        self.assertIn("cannot rollback from step 'idle'", err.getvalue())

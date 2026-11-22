@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
+import fcntl
 import getpass
 import hashlib
 import hmac
@@ -266,6 +268,22 @@ class Rotator:
         if not self.env_path.exists():
             raise RotationError(f"{self.env_path} not found (run from a deploy dir or pass --dir)")
         return self.env_path.read_text(encoding="utf-8")
+
+    @contextlib.contextmanager
+    def lock(self):
+        """One mutating command at a time: they read-modify-write .env and state.json. The lock is held for the
+        whole command (flock, released when the process ends) and a second command fails at once."""
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.state_path.with_name("state.lock"), os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                raise RotationError("another rotate.py command that changes secrets is running "
+                                    "(rotation/state.lock): wait for it to finish") from None
+            yield
+        finally:
+            os.close(fd)
 
     def load_state(self) -> dict[str, Any]:
         if self.state_path.exists():
@@ -1186,7 +1204,10 @@ def main(argv: list[str] | None = None, rotator: Rotator | None = None) -> int:
             return 2
         rotator = Rotator(base, Runner(base), maintenance=getattr(args, "maintenance", False),
                           error_threshold=getattr(args, "error_threshold", 5))
+    stack = contextlib.ExitStack()
     try:
+        if args.cmd in ("stage", "migrate", "finalize", "rollback"):
+            stack.enter_context(rotator.lock())
         if args.cmd == "plan":
             rotator.plan()
         elif args.cmd == "status":
@@ -1224,6 +1245,8 @@ def main(argv: list[str] | None = None, rotator: Rotator | None = None) -> int:
     except RotationError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    finally:
+        stack.close()
     return 0
 
 
