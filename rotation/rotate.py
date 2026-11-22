@@ -111,8 +111,18 @@ def env_keys(text: str, commented: bool = False) -> set[str]:
     return keys
 
 
+def fsync_dir(path: Path) -> None:
+    """Persist a directory entry (a create, rename or unlink): syncing the file alone does not."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def write_atomic(path: Path, text: str) -> None:
-    """Temp file + os.replace, keeping the original file mode (0600 for a new file)."""
+    """Temp file + os.replace, keeping the original file mode (0600 for a new file). The file and its
+    directory are synced, so a returned write survives a power loss."""
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.tmp.")
     try:
@@ -122,6 +132,7 @@ def write_atomic(path: Path, text: str) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+        fsync_dir(path.parent)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
@@ -140,7 +151,10 @@ def backup_file(path: Path, now: datetime) -> Path:
         raise RotationError("could not create a unique .env backup")
     with os.fdopen(fd, "wb") as f:
         f.write(path.read_bytes())
+        f.flush()
+        os.fsync(f.fileno())
     os.chmod(dest, 0o600)
+    fsync_dir(dest.parent)
     return dest
 
 
@@ -260,8 +274,6 @@ class Rotator:
 
     def save_state(self, state: dict[str, Any]) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.state_path.exists():
-            self.state_path.touch(mode=0o600)
         write_atomic(self.state_path, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
     def step_of(self, name: str) -> str:
@@ -876,26 +888,35 @@ class Rotator:
         sec = stamp.strftime("%Y-%m-%d-%H%M%S")
         candidates = [f"{stamp.strftime('%Y-%m-%d')}.age", f"{sec}-{name}.age"]
         candidates += [f"{sec}-{name}-{n}.age" for n in range(1, 100)]
-        for cand in candidates:
-            path = self.archive_dir / cand
-            try:
-                os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
-                break
-            except FileExistsError:
-                continue
-        else:
-            raise RotationError("could not create a unique archive file")
-        text = f"# retired {stamp.isoformat()} {name}\n" + "\n".join(lines) + "\n"
+        # age writes to a private temp name that no `*.age` glob matches. The finished file is synced, then
+        # published under its final name with a hard link (it fails if the name exists, so nothing is overwritten).
+        fd, tmp_name = tempfile.mkstemp(dir=self.archive_dir, prefix=".archive-", suffix=".part")
+        os.close(fd)
+        tmp = Path(tmp_name)
         try:
-            r = self.runner.run(["age", "-r", recipient], input_text=text, stdout_path=path)
-        except BaseException:  # an interrupted run must not leave a zero-byte .age behind
-            path.unlink(missing_ok=True)
-            raise
-        if r.returncode != 0:
-            path.unlink(missing_ok=True)
-            raise RotationError("age failed: retired values were NOT archived; nothing was changed")
-        os.chmod(path, 0o600)
-        return path
+            text = f"# retired {stamp.isoformat()} {name}\n" + "\n".join(lines) + "\n"
+            res = self.runner.run(["age", "-r", recipient], input_text=text, stdout_path=tmp)
+            if res.returncode != 0:
+                raise RotationError("age failed: retired values were NOT archived; nothing was changed")
+            os.chmod(tmp, 0o600)
+            fd = os.open(tmp, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            for cand in candidates:
+                path = self.archive_dir / cand
+                try:
+                    os.link(tmp, path)
+                    break
+                except FileExistsError:
+                    continue
+            else:
+                raise RotationError("could not create a unique archive file")
+            fsync_dir(self.archive_dir)
+            return path
+        finally:  # a failed or interrupted run leaves no partial file; the archive, if published, keeps its link
+            tmp.unlink(missing_ok=True)
 
     def confined_key_path(self, container_path: str) -> Path:
         """Host path of a key file, refused unless it really lives inside the certs dir (symlinks resolved)."""

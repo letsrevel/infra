@@ -304,7 +304,8 @@ class StateMachineTests(Base):
         call = calls[1]
         self.assertEqual(call.argv, ["age", "-r", "age1abc"])
         self.assertIn("SALT_KEY=oldsalt+/=", call.input)
-        self.assertTrue(str(call.stdout_path).endswith(".age"))
+        self.assertFalse(str(call.stdout_path).endswith(".age"))  # a temp name: .age appears only when complete
+        self.assertEqual(len(list((self.tmp / "rotation" / "archive").glob("*.age"))), 1)
         self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
 
     def test_stripe_list_append_and_finalize_drops_only_old(self) -> None:
@@ -1640,3 +1641,67 @@ class BatchInterruptTests(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DurabilityTests(Base):
+    """Round 1: files are synced before the next step, directories too (a rename or create is not durable alone)."""
+
+    def synced(self):
+        """Patch os.fsync; the returned list holds True for a directory, False for a file, per call."""
+        kinds: list[bool] = []
+        real = os.fsync
+
+        def spy(fd):
+            kinds.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+            real(fd)
+
+        patcher = mock.patch.object(r.os, "fsync", spy)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return kinds
+
+    def test_backup_syncs_the_file_and_its_directory(self) -> None:
+        kinds = self.synced()
+        r.backup_file(self.tmp / ".env", self.clock[0])
+        self.assertIn(False, kinds)
+        self.assertIn(True, kinds)
+
+    def test_atomic_write_syncs_the_directory_after_the_rename(self) -> None:
+        kinds = self.synced()
+        r.write_atomic(self.tmp / ".env", "A=1\n")
+        self.assertEqual(kinds, [False, True])
+
+    def test_state_file_is_never_created_empty(self) -> None:
+        rot = self.make()
+        with mock.patch.object(r, "write_atomic", side_effect=OSError("boom")):
+            with self.assertRaises(OSError):
+                rot.save_state({"version": 1, "secrets": {}})
+        self.assertFalse(rot.state_path.exists())
+        rot.save_state({"version": 1, "secrets": {}})
+        self.assertEqual(stat.S_IMODE(rot.state_path.stat().st_mode), 0o600)
+
+    def test_age_output_is_published_only_when_complete_and_synced(self) -> None:
+        rot = self.make()
+        archive = self.tmp / "rotation" / "archive"
+        seen: list[list[str]] = []
+        real_run = self.runner.run
+
+        def run(argv, **kw):
+            if argv[0] == "age":
+                seen.append([p.name for p in archive.glob("*.age")])
+            return real_run(argv, **kw)
+
+        self.runner.run = run
+        kinds = self.synced()
+        path = rot.archive("age1abc", "SALT_KEY", ["SALT_KEY=v"])
+        self.assertEqual(seen, [[]])  # no *.age exists while age is still writing
+        self.assertEqual(path.read_bytes(), b"ENCRYPTED")
+        self.assertEqual([p.name for p in archive.iterdir()], [path.name])  # no temp file left
+        self.assertIn(False, kinds)
+        self.assertIn(True, kinds)
+
+    def test_failed_age_publishes_nothing(self) -> None:
+        rot = self.make(fail=lambda line: line.startswith("age "))
+        with self.assertRaises(r.RotationError):
+            rot.archive("age1abc", "SALT_KEY", ["SALT_KEY=v"])
+        self.assertEqual(list((self.tmp / "rotation" / "archive").iterdir()), [])
