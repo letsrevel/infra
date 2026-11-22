@@ -1762,10 +1762,6 @@ class BatchInterruptTests(Base):
         self.assertFalse([line for line in self.out if "INTERRUPTED" in line])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class DurabilityTests(Base):
     """Round 1: files are synced before the next step, directories too (a rename or create is not durable alone)."""
 
@@ -1921,3 +1917,7 @@ class PushoverForwardOnlyTests(Base):
     def test_user_key_is_refused_in_batch(self) -> None:
         with self.assertRaises(r.RotationError):
             self.make(prompts=["pu_new"]).stage(["PUSHOVER_USER_KEY"], batch=True)
+
+
+if __name__ == "__main__":
+    unittest.main()
