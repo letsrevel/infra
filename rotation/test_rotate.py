@@ -1639,6 +1639,57 @@ class FinalizeRecoveryTests(Base):
         self.assertEqual(self.env("STRIPE_SECRET_KEY"), "sk_new")
         self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
 
+    # ---- a failed directory sync after os.replace: the write happened
+    def fsync_fails_once_after(self, target: Path, needle: str) -> None:
+        real_write, real_sync, armed = r.write_atomic, r.fsync_dir, []
+
+        def write(path, text):
+            if path == target and needle in text and not armed:
+                armed.append(1)
+            real_write(path, text)
+
+        def sync(path):
+            if armed == [1]:
+                armed.append(2)
+                raise OSError(5, "Input/output error")
+            real_sync(path)
+
+        for name, fn in (("write_atomic", write), ("fsync_dir", sync)):
+            patcher = mock.patch.object(r, name, fn)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_write_atomic_raises_dirsyncerror_with_the_new_content_in_place(self) -> None:
+        target = self.tmp / "f.txt"
+        target.write_text("old")
+        with mock.patch.object(r, "fsync_dir", side_effect=OSError(5, "Input/output error")):
+            with self.assertRaises(r.DirSyncError):
+                r.write_atomic(target, "new")
+        self.assertEqual(target.read_text(), "new")
+        self.assertEqual(list(self.tmp.glob(".f.txt.tmp.*")), [])
+
+    def _dir_sync_then_resume(self, rot: r.Rotator) -> None:
+        with self.assertRaises(r.RotationError) as cm:
+            rot._finalize_one("SALT_KEY", False, "age1abc")
+        self.assertIn("Run `finalize SALT_KEY` again", str(cm.exception))
+        backup = self.fin_backups[0]
+        self.assertTrue(backup.exists())
+        self.assertEqual(rot.load_state()["secrets"]["SALT_KEY"]["finalizing"]["backup"], backup.name)
+        self.assertEqual(rot.finalize(["SALT_KEY"]), 0)  # the directory sync works again
+        self.assertEqual(rot.step_of("SALT_KEY"), "finalized")
+        self.assertEqual(self.env("SALT_KEY_FALLBACKS"), "")
+        self.assertFalse(backup.exists())
+
+    def test_dir_sync_failure_on_the_journal_save_keeps_the_backup(self) -> None:
+        rot = self.staged_salt()
+        self.fsync_fails_once_after(rot.state_path, '"finalizing": {')
+        self._dir_sync_then_resume(rot)
+
+    def test_dir_sync_failure_on_the_env_write_keeps_journal_and_backup(self) -> None:
+        rot = self.staged_salt()
+        self.fsync_fails_once_after(rot.env_path, "SALT_KEY_FALLBACKS=\n")
+        self._dir_sync_then_resume(rot)
+
 
 class UnreferencedBackupTests(Base):
     def test_status_warns_about_a_backup_the_state_does_not_reference(self) -> None:

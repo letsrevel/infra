@@ -125,9 +125,15 @@ def fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
+class DirSyncError(OSError):
+    """write_atomic replaced the file, then syncing its directory failed: the new content IS in place but
+    may not survive a power loss. Callers must treat the write as done, not as "nothing was written"."""
+
+
 def write_atomic(path: Path, text: str) -> None:
     """Temp file + os.replace, keeping the original file mode (0600 for a new file). The file and its
-    directory are synced, so a returned write survives a power loss."""
+    directory are synced, so a returned write survives a power loss. Any exception except DirSyncError
+    means the target is unchanged; DirSyncError means the new content is in place."""
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.tmp.")
     try:
@@ -137,10 +143,14 @@ def write_atomic(path: Path, text: str) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
-        fsync_dir(path.parent)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+    try:
+        fsync_dir(path.parent)
+    except OSError as e:
+        raise DirSyncError(e.errno, f"{path.name} was written but its directory could not be synced "
+                                    f"({e.strerror or e})") from e
 
 
 def backup_file(path: Path, now: datetime) -> Path:
@@ -1070,6 +1080,10 @@ class Rotator:
             try:
                 self.update_state(name, finalizing={"backup": fin_backup.name,
                                                     "archived": bool(recipient) or bool(journal and journal.get("archived"))})
+            except DirSyncError:  # the journal IS saved (it may just not survive a power loss): keep the backup
+                raise RotationError(f"{name}: the finalize journal was saved but its directory could not be synced; "
+                                    f"{fin_backup.name} is kept and state.json refers to it. Run `finalize {name}` "
+                                    f"again: it resumes from that file") from None
             except BaseException:
                 if not journal:  # the journal was not saved: nothing refers to the plaintext copy
                     fin_backup.unlink(missing_ok=True)
@@ -1078,6 +1092,10 @@ class Rotator:
                 for var, val in edits.items():
                     env = set_env(env, var, val)
                 write_atomic(self.env_path, env)
+            except DirSyncError:  # .env IS written, so the journal and the backup stay: a re-run resumes
+                raise RotationError(f"{name}: .env was written with the finalized value but its directory could "
+                                    f"not be synced; the journal and {fin_backup.name} are kept. Run "
+                                    f"`finalize {name}` again: it resumes from that file and rolls") from None
             except BaseException:
                 if not journal:  # .env is unchanged: undo the journal and drop the plaintext copy
                     self.update_state(name, finalizing=None)
