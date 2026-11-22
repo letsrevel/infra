@@ -52,7 +52,7 @@ def utcnow() -> datetime:
 
 
 # --------------------------------------------------------------------------- env file editing
-_LINE = re.compile(r"^(?P<pre>\s*(?:export\s+)?)(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<rest>.*)$")
+_LINE = re.compile(r"^(?P<pre>\s*(?:export\s+)?)(?P<key>[A-Za-z_][A-Za-z0-9_]*)(?P<gap>[ \t]*)=(?P<rest>.*)$")
 _DQ = re.compile(r'^"((?:[^"\\]|\\.)*)"(.*)$')
 _SQ = re.compile(r"^'((?:[^'\\]|\\.)*)'(.*)$")
 _SAFE = re.compile(r"[A-Za-z0-9_.~:/@%+,=\-]*")
@@ -61,10 +61,11 @@ _ESC = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "
 
 def parse_value(rest: str) -> tuple[str, str | None, str]:
     """Split the right-hand side of KEY=... into (decoded value, quote style, trailing text)."""
-    if m := _DQ.match(rest):
+    rest_q = rest.lstrip()  # Compose ignores blanks between `=` and a quoted value
+    if m := _DQ.match(rest_q):
         body = re.sub(r"\\(.)", lambda e: _ESC.get(e.group(1), e.group(0)), m.group(1))
         return body, '"', m.group(2)
-    if m := _SQ.match(rest):
+    if m := _SQ.match(rest_q):
         return m.group(1).replace("\\'", "'"), "'", m.group(2)
     c = re.search(r"\s#", rest)
     raw = rest[: c.start()] if c else rest
@@ -100,7 +101,7 @@ def set_env(text: str, name: str, value: str) -> str:
             old, quote, tail = parse_value(m.group("rest"))
             if old == value:
                 return text
-            lines[i] = f"{m.group('pre')}{name}={encode_value(value, quote)}{tail}"
+            lines[i] = f"{m.group('pre')}{name}{m.group('gap')}={encode_value(value, quote)}{tail}"
             return "\n".join(lines)
     base = text if text == "" or text.endswith("\n") else text + "\n"
     return f"{base}{name}={encode_value(value, None)}\n"
@@ -334,8 +335,7 @@ class Rotator:
             r = self.compose("up", "-d", "--no-deps", "--force-recreate", svc)
             if r.returncode != 0:
                 raise RotationError(f"force-recreate {svc} failed (exit {r.returncode})")
-        services = self.filter_active(services)
-        if not services:
+        if not services:  # no filter here: the script rejects an undefined name and skips an inactive profile
             return
         script = self.base / "deploy-rollout.sh"
         if not script.exists():
@@ -369,8 +369,9 @@ class Rotator:
             targets = self.filter_active(["web", "celery_default"])
             r = self.compose("logs", "--no-color", "--since", since.strftime("%Y-%m-%dT%H:%M:%SZ"), *targets)
             n = sum(1 for line in (r.stdout or "").splitlines() if ERROR_LINE.search(line))
-            results.append((f"error lines since rollout (max {self.error_threshold})", n <= self.error_threshold,
-                            f"{n} found"))
+            results.append((f"error lines since rollout (max {self.error_threshold})",
+                            r.returncode == 0 and n <= self.error_threshold,
+                            f"{n} found" if r.returncode == 0 else f"logs unreadable (exit {r.returncode})"))
         if "frontend" in services:
             r = self.compose("exec", "-T", "frontend", "node", "-e",
                              "require('http').get('http://localhost:3000',"
@@ -589,10 +590,11 @@ class Rotator:
             services = sorted({x for n in pending if state[n].get("roll", True) for x in MANIFEST[n].services},
                               key=_svc_order)
             recreate = sorted({x for n in pending for x in state[n].get("recreate", [])})
+            to_verify = sorted({x for n in pending for x in MANIFEST[n].services}, key=_svc_order) + recreate
             ok = False
             try:
                 self.roll(services, recreate)
-                ok = self.verify(services, started)
+                ok = self.verify(to_verify, started)
             except RotationError as e:
                 self.out(f"ERROR: {e}")
             if not ok:

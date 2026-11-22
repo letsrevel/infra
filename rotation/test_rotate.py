@@ -381,11 +381,20 @@ class StateMachineTests(Base):
         self.assertEqual(rot.stage(["GOOGLE_WALLET_SERVICE_ACCOUNT_KEY_PATH"]), 0)
         self.assertEqual(self.env("GOOGLE_WALLET_SERVICE_ACCOUNT_KEY_PATH"), "/app/certs/b.json")
 
-    def test_services_outside_active_profiles_are_not_rolled(self) -> None:
+    def test_services_outside_active_profiles_are_left_to_the_roll_script(self) -> None:
+        # The script skips an inactive profile and rejects an undefined name (RollScriptTests): the tool
+        # must not drop a target itself, or a typo in the manifest would pass silently.
         rot = self.make(prompts=["x"], files=[r.TELEGRAM_CONFIRM_PHRASE])
         with mock.patch.object(r.Rotator, "active_services", return_value={"web"}):
             rot.stage(["TELEGRAM_BOT_TOKEN"])
-        self.assertFalse([x for x in self.runner.argv_lines() if "deploy-rollout.sh" in x])
+        self.assertTrue([x for x in self.runner.argv_lines() if x.endswith("deploy-rollout.sh roll telegram")])
+        ps = [x for x in self.runner.argv_lines() if x.startswith("docker compose ps")]
+        self.assertFalse([x for x in ps if "telegram" in x])  # but an inactive service is not health-checked
+
+    def test_undefined_roll_target_fails_the_roll(self) -> None:
+        rot = self.make(fail=lambda line: line.endswith("deploy-rollout.sh roll nosuch"))
+        with self.assertRaisesRegex(r.RotationError, "roll nosuch failed"):
+            rot.roll(["nosuch"])
 
 
 class CheckDriftTests(Base):
@@ -1073,11 +1082,19 @@ class ReviewRound5Tests(Base):
         rot.stage(["SALT_KEY"])
         rot.migrate()
         baks = sorted(self.tmp.glob(".env.bak.*"))
-        with mock.patch.object(r, "write_atomic", side_effect=OSError("disk full")):
+        real = r.write_atomic
+
+        def write(path, text):  # the journal save goes through; only the .env write fails
+            if path == rot.env_path:
+                raise OSError("disk full")
+            real(path, text)
+
+        with mock.patch.object(r, "write_atomic", write):
             with self.assertRaises(OSError):
                 rot._finalize_one("SALT_KEY", False, "age1abc")
         self.assertEqual(sorted(self.tmp.glob(".env.bak.*")), baks)
         self.assertEqual(rot.step_of("SALT_KEY"), "migrated")
+        self.assertIsNone(rot.load_state()["secrets"]["SALT_KEY"].get("finalizing"))  # the journal was cleared
 
     def test_two_archives_in_the_same_second_get_distinct_private_files(self) -> None:
         rot = self.make()
@@ -1734,3 +1751,31 @@ class LockTests(Base):
         with contextlib.redirect_stderr(err):  # lock free again: the command runs and fails on its own merits
             self.assertEqual(r.main([*cli, "rollback", "STRIPE_SECRET_KEY"], rotator=self.make()), 1)
         self.assertIn("cannot rollback from step 'idle'", err.getvalue())
+
+
+class ReviewRound1Tests(Base):
+    def test_verify_fails_when_the_logs_cannot_be_read(self) -> None:
+        rot = self.make(fail=lambda line: line.startswith("docker compose logs"))
+        self.assertFalse(rot.verify(["web"], self.clock[0]))
+        self.assertIn("logs unreadable", "\n".join(self.out))
+
+    def test_batch_verifies_grafana_although_it_is_not_rolled(self) -> None:
+        rot = self.make()
+        self.assertEqual(rot.stage(["GRAFANA_ADMIN_PASSWORD"], batch=True), 0)
+        ps = [x for x in self.runner.argv_lines() if x.startswith("docker compose ps")]
+        self.assertTrue([x for x in ps if x.endswith("grafana")])
+        self.assertFalse([x for x in self.runner.argv_lines() if "deploy-rollout.sh" in x])
+
+    def test_spaces_around_the_equals_sign(self) -> None:
+        text = 'STRIPE_SECRET_KEY = sk_old # k\nB  =  "two words"\n'
+        self.assertEqual(r.get_env(text, "STRIPE_SECRET_KEY"), "sk_old")
+        self.assertEqual(r.get_env(text, "B"), "two words")
+        out = r.set_env(text, "STRIPE_SECRET_KEY", "sk_new")
+        self.assertEqual(out.split("\n")[0], "STRIPE_SECRET_KEY =sk_new # k")
+        self.assertEqual(r.get_env(out, "STRIPE_SECRET_KEY"), "sk_new")
+        self.assertIn("STRIPE_SECRET_KEY", r.env_keys(text))
+        (self.tmp / ".env").write_text(ENV.replace("STRIPE_SECRET_KEY=sk_old", "STRIPE_SECRET_KEY = sk_old"))
+        rot = self.make(prompts=["sk_new"])
+        self.assertEqual(rot.stage(["STRIPE_SECRET_KEY"]), 0)
+        self.assertEqual(self.env("STRIPE_SECRET_KEY"), "sk_new")
+        self.assertNotIn("nothing to rotate", "\n".join(self.out))
