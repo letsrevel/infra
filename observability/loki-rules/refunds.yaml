@@ -17,7 +17,7 @@ groups:
           severity: critical
         annotations:
           summary: "Automatic refund failed"
-          description: "An automatic refund failed or could not start. A buyer paid and did not get the money back. Refund by hand in Stripe. See docs/guides/observability.md in revel-backend."
+          description: "An automatic refund failed or could not start. A buyer paid and did not get the money back. In Grafana Explore, read the line metadata. If the refund was not created (no refund_id), refund by hand in Stripe with the ids. If a created refund failed later (refund_id, status and failure_reason present), do not refund again in Stripe: read failure_reason and pay the buyer back another way when the card or bank account cannot receive it. Runbook: revel-backend docs/guides/observability.md."
 
   - name: revel-accounts
     rules:

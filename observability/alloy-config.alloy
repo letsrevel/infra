@@ -109,6 +109,9 @@ loki.process "parse_json" {
       session_id        = "session_id",
       payment_intent_id = "payment_intent_id",
       payment_id        = "payment_id",
+      // Stripe refund id and its failure_reason (a fixed Stripe enum code, not free text).
+      refund_id         = "refund_id",
+      failure_reason    = "failure_reason",
     }
   }
 
@@ -143,6 +146,8 @@ loki.process "parse_json" {
       session_id        = "",
       payment_intent_id = "",
       payment_id        = "",
+      refund_id         = "",
+      failure_reason    = "",
     }
   }
 
