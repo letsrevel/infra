@@ -1366,5 +1366,180 @@ class RevertStateRestoreFailureTests(Base):
         self.assertEqual(self.env("DB_PASSWORD"), "olddbpass")
 
 
+
+class FinalizeRecoveryTests(Base):
+    """A finalize that fails, or is killed, half way must leave a state that a re-run or the operator can finish."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.tmp / ".env").write_text(ENV + "ROTATION_AGE_RECIPIENT=age1abc\n")
+        which = mock.patch.object(r.shutil, "which", return_value="/usr/bin/age")
+        which.start()
+        self.addCleanup(which.stop)
+        self.failing = False
+        self.fin_backups: list[Path] = []
+        real = r.backup_file
+
+        def spy(path, now):
+            dest = real(path, now)
+            self.fin_backups.append(dest)
+            return dest
+
+        patcher = mock.patch.object(r, "backup_file", spy)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def staged_salt(self, **kw) -> r.Rotator:
+        rot = self.make(**kw)
+        rot.stage(["SALT_KEY"])
+        rot.migrate()
+        self.fin_backups.clear()  # from here on, only the backups that finalize makes
+        return rot
+
+    def killed_before_the_state_update(self, rot: r.Rotator, name: str) -> None:
+        """The on-disk result of a SIGKILL after the .env edit, the roll and the cleanup, before `finalized`."""
+        real = rot.update_state
+
+        def update(n, **fields):
+            if fields.get("step") == "finalized":
+                raise KeyboardInterrupt
+            return real(n, **fields)
+
+        with mock.patch.object(rot, "update_state", update), self.assertRaises(KeyboardInterrupt):
+            rot.finalize([name])
+
+    def test_failed_verify_deletes_the_finalize_backup(self) -> None:
+        rot = self.staged_salt(fail=lambda line: self.failing and line.endswith("manage.py check"))
+        self.failing = True
+        self.assertEqual(rot.finalize(["SALT_KEY"]), 1)
+        self.assertIn("verification failed after dropping the old values", "\n".join(self.out))
+        self.assertEqual(len(self.fin_backups), 1)
+        self.assertFalse(self.fin_backups[0].exists())
+
+    def test_failed_restore_roll_deletes_the_finalize_backup(self) -> None:
+        rot = self.staged_salt(fail=lambda line: self.failing and "deploy-rollout.sh" in line)
+        self.failing = True
+        self.assertEqual(rot.finalize(["SALT_KEY"]), 1)
+        self.assertEqual(len(self.fin_backups), 1)
+        self.assertFalse(self.fin_backups[0].exists())
+
+    def test_failed_env_restore_keeps_the_backup_and_names_it(self) -> None:
+        rot = self.staged_salt(fail=lambda line: self.failing and line.endswith("manage.py check"))
+        self.failing = True
+        real, env_writes = r.write_atomic, []
+
+        def write(path, text):
+            if path == rot.env_path:
+                env_writes.append(1)
+                if len(env_writes) == 2:  # the restore after the failed verify
+                    raise OSError("disk full")
+            real(path, text)
+
+        with mock.patch.object(r, "write_atomic", write):
+            self.assertEqual(rot.finalize(["SALT_KEY"]), 1)
+        backup = self.fin_backups[0]
+        self.assertTrue(backup.exists())  # the only copy of the old values
+        self.assertEqual(r.get_env(backup.read_text(), "SALT_KEY_FALLBACKS"), "oldsalt+/=")
+        self.assertEqual(self.env("SALT_KEY_FALLBACKS"), "")
+        text = "\n".join(self.out)
+        self.assertIn(f"the old values are in {backup.name}; copy them back into .env, delete {backup.name}", text)
+        self.assertEqual(rot.step_of("SALT_KEY"), "migrated")
+
+    def test_rerun_after_a_killed_list_finalize_completes(self) -> None:
+        rot = self.make(prompts=["whsec_new1,whsec_new2"])
+        rot.stage(["STRIPE_WEBHOOK_SECRETS"])
+        self.advance(hours=25)
+        self.killed_before_the_state_update(rot, "STRIPE_WEBHOOK_SECRETS")
+        self.assertEqual(self.env("STRIPE_WEBHOOK_SECRETS"), "whsec_new1,whsec_new2")
+        self.assertEqual(rot.step_of("STRIPE_WEBHOOK_SECRETS"), "staged")
+        rot = self.make()
+        self.assertEqual(rot.finalize(["STRIPE_WEBHOOK_SECRETS"]), 0)
+        self.assertEqual(self.env("STRIPE_WEBHOOK_SECRETS"), "whsec_new1,whsec_new2")
+        self.assertEqual(rot.step_of("STRIPE_WEBHOOK_SECRETS"), "finalized")
+        self.assertIn("no retired value left to archive", "\n".join(self.out))
+        self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
+
+    def test_rerun_after_a_killed_oidc_finalize_completes(self) -> None:
+        rot = self.make()
+        rot.stage(["OIDC_SIGNING_KEY_PATH"])
+        self.advance(days=31)
+        self.killed_before_the_state_update(rot, "OIDC_SIGNING_KEY_PATH")
+        self.assertFalse((self.tmp / "certs" / "oidc.pem").exists())  # archived, then deleted
+        rot = self.make()
+        self.assertEqual(rot.finalize(["OIDC_SIGNING_KEY_PATH"]), 0)
+        self.assertEqual(rot.step_of("OIDC_SIGNING_KEY_PATH"), "finalized")
+        self.assertEqual(self.env("OIDC_SIGNING_KEYS_INACTIVE_PATHS"), "")
+        self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
+
+    def test_rerun_after_killed_fallback_and_one_shot_finalizes_completes(self) -> None:
+        rot = self.staged_salt()
+        self.killed_before_the_state_update(rot, "SALT_KEY")
+        rot = self.make()
+        self.assertEqual(rot.finalize(["SALT_KEY"]), 0)
+        self.assertEqual(self.env("SALT_KEY_FALLBACKS"), "")
+        rot = self.make(prompts=["sk_new"])
+        rot.stage(["STRIPE_SECRET_KEY"])
+        self.killed_before_the_state_update(rot, "STRIPE_SECRET_KEY")
+        rot = self.make()
+        self.assertEqual(rot.finalize(["STRIPE_SECRET_KEY"]), 0)
+        self.assertEqual(self.env("STRIPE_SECRET_KEY"), "sk_new")
+        self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
+
+
+class UnreferencedBackupTests(Base):
+    def test_status_warns_about_a_backup_the_state_does_not_reference(self) -> None:
+        rot = self.make(prompts=["sk_new"])
+        rot.stage(["STRIPE_SECRET_KEY"])  # its backup is referenced: no warning for it
+        self.advance(seconds=1)
+        orphan = r.backup_file(rot.env_path, self.clock[0])  # a SIGKILL right after stage made its backup
+        self.out.clear()
+        rot.status()
+        warnings = [line for line in self.out if line.startswith("WARNING")]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn(f"WARNING: {orphan.name} is not referenced by rotation/state.json", warnings[0])
+
+    def test_status_warns_about_a_backup_a_finalized_entry_left_behind(self) -> None:
+        rot = self.make(prompts=["sk_new"])
+        rot.stage(["STRIPE_SECRET_KEY"])
+        backup = rot.load_state()["secrets"]["STRIPE_SECRET_KEY"]["backup"]
+        with mock.patch.object(rot, "_unlink_unreferenced"):  # a SIGKILL after the state update
+            rot.finalize(["STRIPE_SECRET_KEY"], archive=False)
+        self.assertTrue((self.tmp / backup).exists())
+        self.out.clear()
+        rot.status()
+        self.assertIn(f"WARNING: {backup} is not referenced", "\n".join(self.out))
+
+    def test_status_is_quiet_when_every_backup_is_referenced(self) -> None:
+        rot = self.make(prompts=["sk_new"])
+        rot.stage(["STRIPE_SECRET_KEY"])
+        rot.status()
+        self.assertFalse([line for line in self.out if line.startswith("WARNING")])
+
+
+class BatchInterruptTests(Base):
+    def test_interrupted_batch_names_the_units_left_staged(self) -> None:
+        def ctrl_c(_line):
+            raise KeyboardInterrupt
+
+        rot = self.make(prompts=["sk_new", "whsec_new"], on_roll=ctrl_c)
+        with self.assertRaises(KeyboardInterrupt):
+            rot.stage(["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRETS"], batch=True)
+        text = "\n".join(self.out)
+        self.assertIn("INTERRUPTED: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRETS staged by this --batch", text)
+        self.assertIn("`rollback STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRETS`", text)
+        rot = self.make()
+        rot.rollback("STRIPE_SECRET_KEY")
+        rot.rollback("STRIPE_WEBHOOK_SECRETS")
+        self.assertEqual(self.env("STRIPE_SECRET_KEY"), "sk_old")
+        self.assertEqual(self.env("STRIPE_WEBHOOK_SECRETS"), "whsec_old")
+
+    def test_interrupt_before_anything_was_staged_says_nothing(self) -> None:
+        rot = self.make()
+        with mock.patch.object(rot, "_stage_group", side_effect=KeyboardInterrupt), \
+                self.assertRaises(KeyboardInterrupt):
+            rot.stage(["STRIPE_SECRET_KEY"], batch=True)
+        self.assertFalse([line for line in self.out if "INTERRUPTED" in line])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -514,10 +514,26 @@ class Rotator:
                                 "ALTER ROLE, recreate pgbouncer/postgres-exporter, roll the app")
         if batch and any(not MANIFEST[n].reversible for n in names):
             raise RotationError("forward-only secrets (TELEGRAM_BOT_TOKEN) are staged by name, without --batch")
-        failures = 0
         if any(MANIFEST[n].kind == mf.GENERATED_WITH_FALLBACK for n in names):
             self.require_fallback_support()
         pending: list[str] = []
+        try:
+            return self._stage_units(names, batch, pending)
+        except BaseException:
+            # Ctrl-C, or an OSError such as a failed state write: say what a batch left staged but not verified.
+            if pending:
+                try:
+                    left = [n for n in pending if self.step_of(n) != "idle"]
+                except Exception:
+                    left = pending
+                if left:
+                    retry = " ".join(dict.fromkeys(retry_name(n) for n in left))
+                    self.out(f"INTERRUPTED: {', '.join(left)} staged by this --batch but not (all) rolled or "
+                             f"verified: undo with `rollback {retry}`, then stage again")
+            raise
+
+    def _stage_units(self, names: list[str], batch: bool, pending: list[str]) -> int:
+        failures = 0
         for unit in self._units(names):
             fallback = MANIFEST[unit[0]].kind == mf.GENERATED_WITH_FALLBACK  # two-phase: always rolls itself
             try:
@@ -918,16 +934,21 @@ class Rotator:
             edits = {s.fallback_var: ""}
         elif s.kind == mf.GENERATED_FILE_WITH_INACTIVE:
             key_files = entry["retired_paths"]
+            inactive = csv_split(get_env(env, s.fallback_var))
             for p in key_files:
+                if p not in inactive and not self.host_path(p).exists():
+                    continue  # an earlier finalize archived, dropped and deleted it, then was killed
                 try:
                     data = self.confined_key_path(p).read_bytes()
                 except OSError as e:
                     raise RotationError(f"retired key {p} cannot be read ({e.strerror}): nothing was changed") from None
                 retired.append(f"OIDC_SIGNING_KEY_FILE:{p}={base64.b64encode(data).decode()}")
-            edits = {s.fallback_var: ",".join(csv_drop(csv_split(get_env(env, s.fallback_var)), key_files))}
+            edits = {s.fallback_var: ",".join(csv_drop(inactive, key_files))}
         elif s.kind == mf.LIST_APPEND:
             items, n_old = csv_split(get_env(env, name)), entry["old_count"]
-            if len(items) != n_old + entry["new_count"]:
+            if len(items) == entry["new_count"]:
+                n_old = 0  # an earlier finalize already dropped the old items, then was killed: nothing to drop
+            elif len(items) != n_old + entry["new_count"]:
                 raise RotationError(f"{name} was edited since staging; fix by hand")
             retired = [f"{name}={v}" for v in items[:n_old]]
             edits = {name: ",".join(items[n_old:])}
@@ -935,7 +956,9 @@ class Rotator:
             old_env = (self.base / entry["backup"]).read_text(encoding="utf-8")
             retired = [f"{v}={get_env(old_env, v)}" for v in entry["vars"] if get_env(old_env, v)]
         # 1. Archive FIRST: a failure here leaves .env, the state and the backups untouched.
-        if recipient:
+        if not retired:  # e.g. a re-run after a killed finalize: the first run archived them already
+            self.out(f"[{name}] no retired value left to archive")
+        elif recipient:
             where = self.archive(recipient, name, retired)
             self.out(f"[{name}] archived {len(retired)} retired value(s) to {where.relative_to(self.base)}")
         else:
@@ -958,10 +981,16 @@ class Rotator:
             except RotationError as e:
                 self.out(f"[{name}] ERROR: {e}")
             if not ok:
-                restored, fb_text = self.env_text(), fin_backup.read_text(encoding="utf-8")
-                for var in edits:
-                    restored = set_env(restored, var, get_env(fb_text, var) or "")
-                write_atomic(self.env_path, restored)
+                try:
+                    restored, fb_text = self.env_text(), fin_backup.read_text(encoding="utf-8")
+                    for var in edits:
+                        restored = set_env(restored, var, get_env(fb_text, var) or "")
+                    write_atomic(self.env_path, restored)
+                except Exception as e:  # keep the backup: it is now the only copy of the old values
+                    raise RotationError(
+                        f"verification failed and .env could not be restored ({e}): the old values are in "
+                        f"{fin_backup.name}; copy them back into .env, delete {fin_backup.name}, then re-roll "
+                        f"with `./deploy-rollout.sh roll {' '.join(s.services)}`") from None
                 fin_backup.unlink(missing_ok=True)  # plaintext copy no longer needed
                 try:
                     self.roll(list(s.services))
@@ -1004,6 +1033,14 @@ class Rotator:
 
     def status(self) -> None:
         self.table(("SECRET", "KIND", "ENV", "STEP", "GRACE END"), self.rows())
+        for f in self.unreferenced_backups():
+            self.out(f"WARNING: {f} is not referenced by rotation/state.json and holds .env values (secrets) in "
+                     "plaintext (a killed stage or finalize, a failed restore, or setup.sh). Check it, then delete it.")
+
+    def unreferenced_backups(self) -> list[str]:
+        refs = {b for e in self.load_state()["secrets"].values() if e.get("step") in ("pending", "staged", "migrated")
+                for b in [e.get("backup"), *e.get("backups", [])] if b}  # the same rule as _unlink_unreferenced
+        return sorted(p.name for p in self.base.glob(f"{self.env_path.name}.bak.*") if p.name not in refs)
 
     def check(self, examples: list[Path]) -> int:
         bad, missing = check_drift([p.read_text(encoding="utf-8") for p in examples],
