@@ -916,6 +916,14 @@ class Rotator:
                 failures += 1
         return failures
 
+    def _list_before_stage(self, entry: dict[str, Any], name: str) -> list[str]:
+        """The list items that stage found (seeded from the legacy single secret when the list was empty)."""
+        try:
+            old_env = (self.base / entry["backup"]).read_text(encoding="utf-8")
+        except OSError as e:
+            raise RotationError(f"stage backup {entry['backup']} cannot be read ({e.strerror}): fix by hand") from None
+        return csv_split(get_env(old_env, name)) or csv_split(get_env(old_env, "STRIPE_WEBHOOK_SECRET"))
+
     def _finalize_one(self, name: str, force: bool, recipient: str) -> None:
         s, entry = MANIFEST[name], self.load_state()["secrets"].get(name, {})
         step = entry.get("step", "idle")
@@ -946,7 +954,7 @@ class Rotator:
             edits = {s.fallback_var: ",".join(csv_drop(inactive, key_files))}
         elif s.kind == mf.LIST_APPEND:
             items, n_old = csv_split(get_env(env, name)), entry["old_count"]
-            if len(items) == entry["new_count"]:
+            if len(items) == entry["new_count"] and not set(items) & set(self._list_before_stage(entry, name)):
                 n_old = 0  # an earlier finalize already dropped the old items, then was killed: nothing to drop
             elif len(items) != n_old + entry["new_count"]:
                 raise RotationError(f"{name} was edited since staging; fix by hand")
@@ -1039,7 +1047,7 @@ class Rotator:
 
     def unreferenced_backups(self) -> list[str]:
         refs = {b for e in self.load_state()["secrets"].values() if e.get("step") in ("pending", "staged", "migrated")
-                for b in [e.get("backup"), *e.get("backups", [])] if b}  # the same rule as _unlink_unreferenced
+                for b in [e.get("backup"), *e.get("backups", [])] if b}  # live entries only, as in _unlink_unreferenced
         return sorted(p.name for p in self.base.glob(f"{self.env_path.name}.bak.*") if p.name not in refs)
 
     def check(self, examples: list[Path]) -> int:

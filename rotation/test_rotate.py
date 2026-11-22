@@ -1459,6 +1459,30 @@ class FinalizeRecoveryTests(Base):
         self.assertIn("no retired value left to archive", "\n".join(self.out))
         self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
 
+    def test_list_with_the_new_items_removed_by_hand_is_still_refused(self) -> None:
+        rot = self.make(prompts=["whsec_new1"])  # old_count == new_count == 1
+        rot.stage(["STRIPE_WEBHOOK_SECRETS"])
+        self.advance(hours=25)
+        text = (self.tmp / ".env").read_text()
+        (self.tmp / ".env").write_text(r.set_env(text, "STRIPE_WEBHOOK_SECRETS", "whsec_old"))
+        self.assertEqual(rot.finalize(["STRIPE_WEBHOOK_SECRETS"]), 1)
+        self.assertIn("was edited since staging; fix by hand", "\n".join(self.out))
+        self.assertEqual(self.env("STRIPE_WEBHOOK_SECRETS"), "whsec_old")
+        self.assertEqual(rot.step_of("STRIPE_WEBHOOK_SECRETS"), "staged")
+
+    def test_rerun_after_a_killed_list_finalize_seeded_from_the_legacy_secret(self) -> None:
+        text = r.set_env((self.tmp / ".env").read_text(), "STRIPE_WEBHOOK_SECRETS", "")
+        (self.tmp / ".env").write_text(r.set_env(text, "STRIPE_WEBHOOK_SECRET", "whsec_legacy"))
+        rot = self.make(prompts=["whsec_new1"])
+        rot.stage(["STRIPE_WEBHOOK_SECRETS"])
+        self.assertEqual(self.env("STRIPE_WEBHOOK_SECRETS"), "whsec_legacy,whsec_new1")
+        self.advance(hours=25)
+        self.killed_before_the_state_update(rot, "STRIPE_WEBHOOK_SECRETS")
+        rot = self.make()
+        self.assertEqual(rot.finalize(["STRIPE_WEBHOOK_SECRETS"]), 0)
+        self.assertEqual(self.env("STRIPE_WEBHOOK_SECRETS"), "whsec_new1")
+        self.assertEqual(rot.step_of("STRIPE_WEBHOOK_SECRETS"), "finalized")
+
     def test_rerun_after_a_killed_oidc_finalize_completes(self) -> None:
         rot = self.make()
         rot.stage(["OIDC_SIGNING_KEY_PATH"])
