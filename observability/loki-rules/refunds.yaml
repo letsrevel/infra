@@ -1,0 +1,20 @@
+# Loki ruler rules (LogQL). Mounted at /loki/rules-local/fake/ (tenant "fake").
+# Alloy replaces each log line with the structlog `event` value (stage.output)
+# and stores `level` as a label, so the rules match the event name as the line.
+groups:
+  - name: revel-refunds
+    rules:
+      - alert: RefundFailed
+        expr: |
+          sum(
+            count_over_time(
+              {service_name=~"web|celery_default", level="error"}
+                |~ "^(late_payment_refund_failed|orphaned_checkout_refund_failed|orphaned_checkout_refund_dispatch_failed|late_payment_refund_dispatch_failed)$"
+              [10m]
+            )
+          ) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Automatic refund failed"
+          description: "An automatic refund failed or could not start. A buyer paid and did not get the money back. Refund by hand in Stripe. See docs/guides/observability.md in revel-backend."

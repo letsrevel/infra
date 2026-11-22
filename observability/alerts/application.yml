@@ -165,7 +165,7 @@ groups:
           severity: critical
         annotations:
           summary: "Stripe session paid without Payment records"
-          description: "A Stripe session that captured money was confirmed with no Payment rows — the buyer was charged and we have no record. Recover the buyer using the paired ERROR log line. Runbook: revel-backend docs/guides/observability.md (money-correctness)."
+          description: "A Stripe session that captured money was confirmed with no Payment rows. Revel now refunds such a checkout automatically when it is a Revel ticket or pass checkout; the log line carries refund_eligible. Staff act only when the RefundFailed alert fires, or when the log line says the session is not eligible. Then recover the buyer by hand, using the paired ERROR log line. Runbook: revel-backend docs/guides/observability.md (money-correctness)."
 
       # ========================================================================
       # Business Logic Alerts

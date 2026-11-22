@@ -33,8 +33,18 @@ schema_config:
         prefix: index_
         period: 24h
 
+# Ruler: evaluates LogQL alert rules and sends them to Alertmanager.
+# With auth_enabled: false the tenant is "fake", so rule files live in
+# /loki/rules-local/fake/ (see docker-compose.yml volume mount).
 ruler:
-  alertmanager_url: http://localhost:9093
+  alertmanager_url: http://alertmanager:9093
+  enable_alertmanager_v2: true
+  storage:
+    type: local
+    local:
+      directory: /loki/rules-local
+  rule_path: /loki/rules-tmp
+  evaluation_interval: 1m
 
 # Retention
 limits_config:
