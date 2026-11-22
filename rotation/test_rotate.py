@@ -1930,6 +1930,25 @@ class CodeRabbitRound3Tests(Base):
             with self.assertRaises(r.RotationError, msg=bad):
                 rot.host_path(bad)
 
+    def test_frontend_probe_has_a_deadline(self) -> None:
+        rot = self.make()
+        self.assertTrue(rot.verify(["frontend"], self.clock[0]))
+        probe = next(c.argv for c in self.runner.calls if "frontend" in c.argv and "node" in c.argv)
+        self.assertIn("setTimeout(10000,()=>process.exit(1))", probe[-1])
+
+    def test_verify_command_checks_the_named_services(self) -> None:
+        rot = self.make()
+        self.assertEqual(r.main(["--dir", str(self.tmp), "verify", "alertmanager"], rotator=rot), 0)
+        ps = [x for x in self.runner.argv_lines() if x.startswith("docker compose ps")]
+        self.assertEqual(ps, ["docker compose ps --format json alertmanager"])
+
+    def test_pushover_recovery_verifies_alertmanager_too(self) -> None:
+        (self.tmp / ".env").write_text(ENV + "PUSHOVER_USER_KEY=pu_old\n")
+        rot = self.make(prompts=["pu_new"], files=[r.PUSHOVER_CONFIRM_PHRASE],
+                        fail=lambda l: l.endswith("manage.py check"))
+        rot.stage(["PUSHOVER_USER_KEY"])
+        self.assertRegex("\n".join(self.out), r"rotate\.py verify [a-z_ ]*alertmanager")
+
 
 if __name__ == "__main__":
     unittest.main()

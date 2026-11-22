@@ -393,7 +393,8 @@ class Rotator:
         if "frontend" in services:
             r = self.compose("exec", "-T", "frontend", "node", "-e",
                              "require('http').get('http://localhost:3000',"
-                             "r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))")
+                             "r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+                             ".setTimeout(10000,()=>process.exit(1))")
             results.append(("frontend /", r.returncode == 0, f"exit {r.returncode}"))
         domain = get_env(self.env_text(), "API_DOMAIN")
         if backend and domain:
@@ -796,7 +797,7 @@ class Rotator:
             self.out(f"verification failed. {names} was NOT rolled back: the old value is already revoked at the "
                      "provider, so .env keeps the new one.")
             self.out(f"Recover by hand: check the value in .env is the one the provider issued, then run "
-                     f"`./deploy-rollout.sh roll {svcs}` and `rotate.py verify`.")
+                     f"`./deploy-rollout.sh roll {svcs}` and `rotate.py verify {svcs}`.")
             raise RotationError("verification failed; forward-only secret kept (see recovery steps above)")
         if not ok:
             self.out("verification failed: rolling back")
@@ -910,7 +911,8 @@ class Rotator:
         self.out(f"[{name}] the interrupted stage had written the new value to .env, so the entry is now "
                  f"`staged` (the old value is revoked and is NOT restored). Not rolled automatically. "
                  f"Recover by hand: check .env holds the value the provider issued, then run "
-                 f"`./deploy-rollout.sh roll {' '.join(s.services)}` and `rotate.py verify`.")
+                 f"`./deploy-rollout.sh roll {' '.join(s.services)}` and "
+                 f"`rotate.py verify {' '.join(s.services)}`.")
 
     def _unlink_unreferenced(self, files: list[str]) -> None:
         """Delete env backups no live (pending/staged/migrated) secret still points at (bundles share one)."""
@@ -1253,6 +1255,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--maintenance", action="store_true", help="allow the DB_PASSWORD maintenance-window rotation")
     p.add_argument("--batch", action="store_true", help="roll and verify once for the whole invocation")
     p = sub.add_parser("verify")
+    p.add_argument("services", nargs="*", help="check these services instead of the app services (e.g. alertmanager)")
     p.add_argument("--error-threshold", type=int, default=5)
     p = sub.add_parser("finalize")
     p.add_argument("names", nargs="+")
@@ -1290,7 +1293,7 @@ def main(argv: list[str] | None = None, rotator: Rotator | None = None) -> int:
         elif args.cmd == "migrate":
             rotator.migrate()
         elif args.cmd == "verify":
-            services = rotator.filter_active(SERVICE_ORDER)
+            services = rotator.filter_active(args.services or SERVICE_ORDER)
             return 0 if rotator.verify(services, rotator.now() - timedelta(minutes=10)) else 1
         elif args.cmd == "finalize":
             return 1 if rotator.finalize(select(args.names, None), force=args.force,
