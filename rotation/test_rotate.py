@@ -58,6 +58,8 @@ class FakeRunner:
             return SimpleNamespace(returncode=1, stdout="", stderr="")
         if argv[:3] == ["docker", "compose", "logs"]:
             return SimpleNamespace(returncode=0, stdout=self.logs, stderr="")
+        if line == "docker compose --profile * config --services":
+            return SimpleNamespace(returncode=0, stdout="\n".join([*SERVICES, "flower"]), stderr="")
         if line == "docker compose config --services":
             return SimpleNamespace(returncode=0, stdout="\n".join(SERVICES), stderr="")
         if argv[:4] == ["docker", "compose", "ps", "--format"]:
@@ -871,6 +873,24 @@ class RollScriptTests(unittest.TestCase):
         for svc in ("beat", "telegram"):
             self.assertIn(f"docker compose up -d --no-deps --force-recreate {svc}\n", text)
             self.assertNotIn(f"docker compose up -d --force-recreate {svc}\n", text)
+
+
+class DeployScriptTextTests(unittest.TestCase):
+    text = (Path(__file__).resolve().parent.parent / "deploy-rollout.sh").read_text()
+
+    def test_roll_check_covers_stopped_containers_and_only_the_migration_images(self) -> None:
+        self.assertIn('docker compose ps -a -q "$svc"', self.text)
+        self.assertNotIn('docker compose ps -q "$svc"', self.text)
+        self.assertIn('case "$ref" in "$IMAGE_BACKEND" | "$IMAGE_FRONTEND") ;; *) continue ;; esac', self.text)
+
+    def test_roll_refusal_names_deploy_and_a_vanished_container_is_reported(self) -> None:
+        self.assertIn("run '$0 deploy'", self.text)
+        self.assertIn("container changed during the check; re-run roll", self.text)
+
+    def test_deploy_rolls_a_component_that_is_behind_its_local_tag(self) -> None:
+        self.assertIn('component_behind "$IMAGE_BACKEND" web celery_default beat telegram && backend_changed=1', self.text)
+        self.assertIn('component_behind "$IMAGE_FRONTEND" frontend && frontend_changed=1', self.text)
+        self.assertLess(self.text.index("component_behind \"$IMAGE_BACKEND\""), self.text.index("nothing to deploy"))
 
 
 class ReviewRound4Tests(Base):
@@ -1942,6 +1962,21 @@ class CodeRabbitRound3Tests(Base):
         ps = [x for x in self.runner.argv_lines() if x.startswith("docker compose ps")]
         self.assertEqual(ps, ["docker compose ps --format json alertmanager"])
 
+    def test_verify_command_rejects_an_undefined_name(self) -> None:
+        rot = self.make()
+        self.assertEqual(r.main(["--dir", str(self.tmp), "verify", "alertmanger"], rotator=rot), 1)
+        self.assertFalse([x for x in self.runner.argv_lines() if x.startswith("docker compose ps")])
+
+    def test_verify_command_fails_when_the_named_list_is_all_inactive(self) -> None:
+        rot = self.make()
+        self.assertEqual(r.main(["--dir", str(self.tmp), "verify", "flower"], rotator=rot), 1)
+        self.assertFalse([x for x in self.runner.argv_lines() if x.startswith("docker compose ps")])
+
+    def test_verify_command_names_the_skipped_inactive_service(self) -> None:
+        rot = self.make()
+        self.assertEqual(r.main(["--dir", str(self.tmp), "verify", "alertmanager", "flower"], rotator=rot), 0)
+        self.assertIn("skipped (not in the active compose profiles): flower", self.out)
+
     def test_pushover_recovery_verifies_alertmanager_too(self) -> None:
         (self.tmp / ".env").write_text(ENV + "PUSHOVER_USER_KEY=pu_old\n")
         rot = self.make(prompts=["pu_new"], files=[r.PUSHOVER_CONFIRM_PHRASE],
@@ -1956,6 +1991,8 @@ class CodeRabbitRound3Tests(Base):
         rot = self.make()
         self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "staged")
         self.assertEqual(rot.finalize(["STRIPE_SECRET_KEY"], force=True, archive=False), 1)
+        self.assertIn("[STRIPE_SECRET_KEY] ERROR: STRIPE_SECRET_KEY was staged by a --batch whose rollout and verify "
+                      "did not finish", "\n".join(self.out))
         self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "staged")
         self.assertTrue(list(self.tmp.glob(".env.bak.*")))  # rollback stays possible
         rot.rollback("STRIPE_SECRET_KEY")
@@ -1982,6 +2019,18 @@ class CodeRabbitRound3Tests(Base):
         failing[0] = False
         rot.rollback("SALT_KEY")
         self.assertFalse(rot.load_state()["secrets"]["SALT_KEY"]["rollback_incomplete"])
+
+    def test_failed_rollback_reroll_blocks_finalize_of_a_non_migrate_secret(self) -> None:
+        failing = [False]
+        rot = self.make(prompts=["sk_new"], fail=lambda l: failing[0] and "deploy-rollout.sh" in l)
+        rot.stage(["STRIPE_SECRET_KEY"])
+        failing[0] = True
+        with self.assertRaises(r.RotationError):
+            rot.rollback("STRIPE_SECRET_KEY")
+        self.assertFalse(r.MANIFEST["STRIPE_SECRET_KEY"].migrate)
+        self.assertEqual(rot.finalize(["STRIPE_SECRET_KEY"], force=True, archive=False), 1)
+        self.assertIn("the last rollback of STRIPE_SECRET_KEY did not finish", "\n".join(self.out))
+        self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "staged")
 
     def test_interrupt_during_the_env_write_keeps_the_finalize_journal(self) -> None:
         rot = self.make(prompts=["whsec_new"])

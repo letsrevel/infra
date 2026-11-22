@@ -366,6 +366,20 @@ class Rotator:
             raise RotationError(f"deploy-rollout.sh roll {' '.join(services)} failed (exit {r.returncode})")
 
     # ---- verify
+    def check_verify_names(self, requested: list[str], kept: list[str]) -> None:
+        """Reject an undefined name, note an inactive one, and refuse an explicit list that checks nothing."""
+        r = self.compose("--profile", "*", "config", "--services")
+        if r.returncode == 0 and r.stdout.strip():
+            defined = set(r.stdout.split())
+            unknown = [s for s in requested if s not in defined]
+            if unknown:
+                raise RotationError(f"unknown service(s): {', '.join(unknown)} (not defined in docker-compose.yml)")
+        skipped = [s for s in requested if s not in kept]
+        if skipped:
+            self.out(f"skipped (not in the active compose profiles): {', '.join(skipped)}")
+        if not kept:
+            raise RotationError("none of the named services is active: nothing to verify")
+
     def verify(self, services: list[str], since: datetime) -> bool:
         services = self.filter_active(services)
         results: list[tuple[str, bool, str]] = []
@@ -1319,6 +1333,8 @@ def main(argv: list[str] | None = None, rotator: Rotator | None = None) -> int:
             rotator.migrate()
         elif args.cmd == "verify":
             services = rotator.filter_active(args.services or SERVICE_ORDER)
+            if args.services:
+                rotator.check_verify_names(args.services, services)
             return 0 if rotator.verify(services, rotator.now() - timedelta(minutes=10)) else 1
         elif args.cmd == "finalize":
             return 1 if rotator.finalize(select(args.names, None), force=args.force,
