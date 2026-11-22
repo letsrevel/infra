@@ -30,6 +30,23 @@ install_rollout() {
     fi
 }
 
+# component_behind <image_ref> <service...>
+# Succeeds when any container (running or stopped) of these services runs an image ID
+# that differs from the local tag's image. Used so a `deploy` that was cut short, or a
+# `pull` done by hand, is still finished by the next `deploy`.
+component_behind() {
+    local ref=$1 cid want svc
+    shift
+    want=$(image_id "$ref")
+    [ -n "$want" ] || return 1
+    for svc in "$@"; do
+        for cid in $(docker compose ps -a -q "$svc"); do
+            [ "$(docker inspect --format '{{.Image}}' "$cid")" != "$want" ] && return 0
+        done
+    done
+    return 1
+}
+
 # One-time migration (causes brief downtime)
 # Run this ONCE after updating config files
 migrate() {
@@ -78,6 +95,10 @@ deploy() {
     local backend_changed=0 frontend_changed=0
     [ "$old_backend" != "$new_backend" ] && backend_changed=1
     [ "$old_frontend" != "$new_frontend" ] && frontend_changed=1
+    # A container that still runs an older image than the local tag is also rolled
+    # (an earlier deploy or a manual pull moved the tag but did not finish).
+    component_behind "$IMAGE_BACKEND" web celery_default beat telegram && backend_changed=1
+    component_behind "$IMAGE_FRONTEND" frontend && frontend_changed=1
 
     if [ "$backend_changed" -eq 0 ] && [ "$frontend_changed" -eq 0 ]; then
         echo -e "${GREEN}No new images — nothing to deploy.${NC}"
@@ -159,10 +180,16 @@ roll() {
     local cid ref stale=0
     for svc in "${svcs[@]}"; do
         grep -Fqx -- "$svc" <<<"$active" || continue
-        for cid in $(docker compose ps -q "$svc"); do
-            ref=$(docker inspect --format '{{.Config.Image}}' "$cid")
+        for cid in $(docker compose ps -a -q "$svc"); do
+            ref=$(docker inspect --format '{{.Config.Image}}' "$cid") || {
+                echo -e "${RED}$svc: container changed during the check; re-run roll.${NC}" >&2
+                return 1
+            }
+            # Only the images with migrations (backend, frontend) are checked; canary,
+            # alertmanager, grafana and the like are never managed by `deploy`.
+            case "$ref" in "$IMAGE_BACKEND" | "$IMAGE_FRONTEND") ;; *) continue ;; esac
             if [ -n "$(image_id "$ref")" ] && [ "$(docker inspect --format '{{.Image}}' "$cid")" != "$(image_id "$ref")" ]; then
-                echo -e "${RED}$svc runs an older image than the local $ref: run '$0 deploy' first (roll never changes images).${NC}" >&2
+                echo -e "${RED}$svc runs an older image than the local $ref: run '$0 deploy' (it applies the migrations through the web rollout and rolls the rest; roll never changes images).${NC}" >&2
                 stale=1
             fi
         done
