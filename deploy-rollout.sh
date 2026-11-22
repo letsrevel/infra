@@ -126,7 +126,8 @@ deploy() {
 # Roll services onto the current .env / compose config WITHOUT pulling images or
 # migrating, so an env-only change (e.g. a secret rotation) never ships new code.
 # Same per-service sequence as `deploy`. With no arguments it rolls the app services;
-# services outside the active compose profiles are skipped. Never `up -d` the whole stack.
+# services outside the active compose profiles are skipped. Refuses a service whose running container uses an
+# older image than the local tag. Never `up -d` the whole stack.
 roll() {
     local order=(web celery_default beat telegram frontend) requested=("$@") svcs=() svc active
     [ "${#requested[@]}" -eq 0 ] && requested=("${order[@]}")
@@ -152,6 +153,22 @@ roll() {
     [ "$bad" -eq 0 ] || return 1
 
     active=$(docker compose config --services)
+
+    # A local tag that moved since the containers were created (a `deploy` that pulled and then stopped before
+    # its migrate/roll) would ship new code without its migrations: refuse and let `deploy` finish first.
+    local cid ref stale=0
+    for svc in "${svcs[@]}"; do
+        grep -Fqx -- "$svc" <<<"$active" || continue
+        for cid in $(docker compose ps -q "$svc"); do
+            ref=$(docker inspect --format '{{.Config.Image}}' "$cid")
+            if [ -n "$(image_id "$ref")" ] && [ "$(docker inspect --format '{{.Image}}' "$cid")" != "$(image_id "$ref")" ]; then
+                echo -e "${RED}$svc runs an older image than the local $ref: run '$0 deploy' first (roll never changes images).${NC}" >&2
+                stale=1
+            fi
+        done
+    done
+    [ "$stale" -eq 0 ] || return 1
+
     for svc in "${svcs[@]}"; do
         if ! grep -Fqx -- "$svc" <<<"$active"; then
             echo -e "${YELLOW}Skipping $svc (defined, but not in the active compose profiles).${NC}"
