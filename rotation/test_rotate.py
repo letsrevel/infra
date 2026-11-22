@@ -493,10 +493,28 @@ class TwoPhaseTests(Base):
             rot.stage(["SALT_KEY"])
         introduced = self.env("SALT_KEY_FALLBACKS")
         self.assertEqual(self.env("SALT_KEY"), "oldsalt+/=")
-        rot = self.make()
+        snaps: list[str] = []
+        rot = self.make(on_roll=lambda _l: snaps.append((self.tmp / ".env").read_text()))
         self.assertEqual(rot.stage(["SALT_KEY"]), 0)  # resumes: promotes, does not generate another key
         self.assertEqual(self.env("SALT_KEY"), introduced)
         self.assertEqual(self.env("SALT_KEY_FALLBACKS"), "oldsalt+/=")
+        # the phase 1 rollout is repeated BEFORE the promoted config is rolled (the first run may never have applied it)
+        self.assertEqual(len(snaps), 2)
+        self.assertEqual(r.get_env(snaps[0], "SALT_KEY"), "oldsalt+/=")
+        self.assertEqual(r.get_env(snaps[0], "SALT_KEY_FALLBACKS"), introduced)
+        self.assertEqual(r.get_env(snaps[1], "SALT_KEY"), introduced)
+
+    def test_resume_does_not_promote_when_the_phase1_rollout_fails(self) -> None:
+        rot = self.make(on_roll=lambda _l: (_ for _ in ()).throw(KeyboardInterrupt()))
+        with self.assertRaises(KeyboardInterrupt):
+            rot.stage(["SALT_KEY"])
+        introduced = self.env("SALT_KEY_FALLBACKS")
+        rot = self.make(fail=lambda line: "deploy-rollout.sh" in line)
+        self.assertEqual(rot.stage(["SALT_KEY"]), 1)
+        self.assertEqual(self.env("SALT_KEY"), "oldsalt+/=")  # still not promoted
+        self.assertEqual(self.env("SALT_KEY_FALLBACKS"), introduced)
+        entry = rot.load_state()["secrets"]["SALT_KEY"]
+        self.assertEqual((entry["step"], entry["phase"]), ("staged", 1))
 
     def test_preexisting_pin_is_never_touched(self) -> None:
         (self.tmp / ".env").write_text(ENV.replace("UNSUBSCRIBE_SIGNING_KEYS=", "UNSUBSCRIBE_SIGNING_KEYS=k1,oldsecretkey,k0"))
@@ -1569,6 +1587,21 @@ class FinalizeRecoveryTests(Base):
         self.assertEqual(rot.step_of("OIDC_SIGNING_KEY_PATH"), "finalized")
         self.assertEqual(self.env("OIDC_SIGNING_KEYS_INACTIVE_PATHS"), "")
         self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
+
+    def test_failed_verify_on_an_oidc_resume_does_not_restore_the_deleted_pem(self) -> None:
+        rot = self.make()
+        rot.stage(["OIDC_SIGNING_KEY_PATH"])
+        self.advance(days=31)
+        self.killed_before_the_state_update(rot, "OIDC_SIGNING_KEY_PATH")  # PEM archived and deleted
+        rot = self.make(fail=lambda line: line.endswith("manage.py check"))
+        self.assertEqual(rot.finalize(["OIDC_SIGNING_KEY_PATH"]), 1)
+        self.assertIn("already archived and deleted", "\n".join(self.out))
+        self.assertEqual(self.env("OIDC_SIGNING_KEYS_INACTIVE_PATHS"), "")  # no path to a deleted file
+        entry = rot.load_state()["secrets"]["OIDC_SIGNING_KEY_PATH"]
+        self.assertTrue(entry["finalizing"])  # the journal stays: a retry resumes it
+        self.assertTrue((self.tmp / entry["finalizing"]["backup"]).exists())
+        self.assertEqual(self.make().finalize(["OIDC_SIGNING_KEY_PATH"]), 0)
+        self.assertEqual(self.make().step_of("OIDC_SIGNING_KEY_PATH"), "finalized")
 
     def test_rerun_after_killed_fallback_and_one_shot_finalizes_completes(self) -> None:
         rot = self.staged_salt()

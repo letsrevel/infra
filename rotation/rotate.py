@@ -660,6 +660,19 @@ class Rotator:
                                      {"phase": 1, "new_index": len(existing), "ever_primary": False,
                                       "pin_created": pin}))], True)
             entry = self.load_state()["secrets"][name]
+        else:
+            # A run that stopped after phase 1 was saved may have stopped before the rollout applied it. Promoting
+            # now could let the first new container write under a key the others cannot read: repeat phase 1.
+            self.out(f"[{name}] resuming: repeating the phase 1 rollout before the promotion")
+            started, ok = self.now(), False
+            try:
+                self.roll(list(s.services))
+                ok = self.verify(list(s.services), started)
+            except RotationError as e:
+                self.out(f"ERROR: {e}")
+            if not ok:
+                raise RotationError(f"{name}: the phase 1 rollout could not be confirmed, so nothing was promoted: "
+                                    "fix the cause and run `stage` again (or `rollback`)")
         env = self.env_text()
         fallbacks, old = csv_split(get_env(env, fb)), get_env(env, name) or ""
         if entry["new_index"] >= len(fallbacks):
@@ -1055,6 +1068,12 @@ class Rotator:
             except RotationError as e:
                 self.out(f"[{name}] ERROR: {e}")
             if not ok:
+                gone = [p for p in key_files if not self.host_path(p).exists()]
+                if gone:  # an earlier run archived and deleted the PEM: restoring its path would point .env at nothing
+                    raise RotationError(
+                        f"verification failed, but the retired key file(s) {', '.join(gone)} were already archived "
+                        f"and deleted, so .env keeps the finalized value and the journal ({fin_backup.name}) is kept: "
+                        f"do NOT delete it. Fix the cause, then run `finalize {name}` again.")
                 try:
                     restored, fb_text = self.env_text(), fin_backup.read_text(encoding="utf-8")
                     for var in edits:
