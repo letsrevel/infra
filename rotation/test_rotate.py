@@ -1483,6 +1483,18 @@ class FinalizeRecoveryTests(Base):
         self.assertEqual(self.env("STRIPE_WEBHOOK_SECRETS"), "whsec_new1")
         self.assertEqual(rot.step_of("STRIPE_WEBHOOK_SECRETS"), "finalized")
 
+    def test_legacy_seeded_list_with_the_new_item_removed_by_hand_is_still_refused(self) -> None:
+        text = r.set_env((self.tmp / ".env").read_text(), "STRIPE_WEBHOOK_SECRETS", "")
+        (self.tmp / ".env").write_text(r.set_env(text, "STRIPE_WEBHOOK_SECRET", "whsec_legacy"))
+        rot = self.make(prompts=["whsec_new1"])  # old_count == new_count == 1
+        rot.stage(["STRIPE_WEBHOOK_SECRETS"])
+        self.advance(hours=25)
+        text = (self.tmp / ".env").read_text()
+        (self.tmp / ".env").write_text(r.set_env(text, "STRIPE_WEBHOOK_SECRETS", "whsec_legacy"))
+        self.assertEqual(rot.finalize(["STRIPE_WEBHOOK_SECRETS"]), 1)
+        self.assertIn("was edited since staging; fix by hand", "\n".join(self.out))
+        self.assertEqual(rot.step_of("STRIPE_WEBHOOK_SECRETS"), "staged")
+
     def test_rerun_after_a_killed_oidc_finalize_completes(self) -> None:
         rot = self.make()
         rot.stage(["OIDC_SIGNING_KEY_PATH"])
