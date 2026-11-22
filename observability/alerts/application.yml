@@ -165,7 +165,7 @@ groups:
           severity: critical
         annotations:
           summary: "Stripe session paid without Payment records"
-          description: "A Stripe session that captured money was confirmed with no Payment rows — the buyer was charged and we have no record. Recover the buyer using the paired ERROR log line. Runbook: revel-backend docs/guides/observability.md (money-correctness)."
+          description: "A Stripe session that captured money was confirmed with no Payment rows. In Grafana Explore, open the stripe_session_paid_without_payments line and read its structured metadata (refund_eligible, session_id, payment_intent_id, organization_id). If refund_eligible is true, Revel refunds the checkout automatically: look for orphaned_checkout_refund_queued and orphaned_checkout_refunded, and act only if the RefundFailed alert fires. If refund_eligible is false, refund the buyer by hand in Stripe with those ids. If the line has no metadata (logged before the Alloy update), do not refund at once: find the payment in Stripe by the time and amount, check whether it already has a refund, and refund by hand only if it has none. Runbook: revel-backend docs/guides/observability.md (money-correctness)."
 
       # ========================================================================
       # Business Logic Alerts

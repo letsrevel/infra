@@ -427,6 +427,7 @@ services:
     command: -config.file=/etc/loki/local-config.yaml
     volumes:
       - ./observability/loki-config.yaml:/etc/loki/local-config.yaml
+      - ./observability/loki-rules:/loki/rules-local/fake:ro
       - loki_data:/loki
     expose:
       - "3100"

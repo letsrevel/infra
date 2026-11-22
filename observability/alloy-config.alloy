@@ -104,6 +104,11 @@ loki.process "parse_json" {
       ticket_id       = "ticket_id",
       delivery_id     = "delivery_id",
       task_id         = "task_id",
+      // Refund triage (revel-backend #1489, #1459): a flag and Stripe/Revel ids, no personal data.
+      refund_eligible   = "refund_eligible",
+      session_id        = "session_id",
+      payment_intent_id = "payment_intent_id",
+      payment_id        = "payment_id",
     }
   }
 
@@ -134,6 +139,10 @@ loki.process "parse_json" {
       ticket_id       = "",
       delivery_id     = "",
       task_id         = "",
+      refund_eligible   = "",
+      session_id        = "",
+      payment_intent_id = "",
+      payment_id        = "",
     }
   }
 
