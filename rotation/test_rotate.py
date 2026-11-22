@@ -1949,6 +1949,58 @@ class CodeRabbitRound3Tests(Base):
         rot.stage(["PUSHOVER_USER_KEY"])
         self.assertRegex("\n".join(self.out), r"rotate\.py verify [a-z_ ]*alertmanager")
 
+    def test_unrolled_batch_entry_cannot_be_finalized(self) -> None:
+        rot = self.make(prompts=["sk_new"], on_roll=lambda _l: (_ for _ in ()).throw(KeyboardInterrupt()))
+        with self.assertRaises(KeyboardInterrupt):  # stopped after the entry was saved, before the batch roll
+            rot.stage(["STRIPE_SECRET_KEY"], batch=True)
+        rot = self.make()
+        self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "staged")
+        self.assertEqual(rot.finalize(["STRIPE_SECRET_KEY"], force=True, archive=False), 1)
+        self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "staged")
+        self.assertTrue(list(self.tmp.glob(".env.bak.*")))  # rollback stays possible
+        rot.rollback("STRIPE_SECRET_KEY")
+        self.assertEqual(self.env("STRIPE_SECRET_KEY"), "sk_old")
+
+    def test_finished_batch_entry_can_be_finalized(self) -> None:
+        rot = self.make(prompts=["sk_new"])
+        self.assertEqual(rot.stage(["STRIPE_SECRET_KEY"], batch=True), 0)
+        self.assertEqual(rot.finalize(["STRIPE_SECRET_KEY"], archive=False), 0)
+
+    def test_failed_rollback_reroll_blocks_migrate_and_finalize_until_it_completes(self) -> None:
+        failing = [False]
+        rot = self.make(fail=lambda l: failing[0] and "deploy-rollout.sh" in l)
+        rot.stage(["SALT_KEY"])
+        failing[0] = True
+        with self.assertRaises(r.RotationError):
+            rot.rollback("SALT_KEY")
+        with self.assertRaisesRegex(r.RotationError, "last rollback did not finish"):
+            rot.migrate()
+        self.advance(days=31)
+        fallbacks = self.env("SALT_KEY_FALLBACKS")
+        self.assertEqual(rot.finalize(["SALT_KEY"], force=True, archive=False), 1)
+        self.assertEqual(self.env("SALT_KEY_FALLBACKS"), fallbacks)
+        failing[0] = False
+        rot.rollback("SALT_KEY")
+        self.assertFalse(rot.load_state()["secrets"]["SALT_KEY"]["rollback_incomplete"])
+
+    def test_interrupt_during_the_env_write_keeps_the_finalize_journal(self) -> None:
+        rot = self.make(prompts=["whsec_new"])
+        rot.stage(["STRIPE_WEBHOOK_SECRETS"])
+        self.advance(days=2)
+        real = r.write_atomic
+
+        def replace_then_interrupt(path, text):
+            real(path, text)  # the rename happened; the interrupt lands in the directory sync
+            if path == self.tmp / ".env":
+                raise KeyboardInterrupt
+
+        with mock.patch.object(r, "write_atomic", replace_then_interrupt), self.assertRaises(KeyboardInterrupt):
+            rot.finalize(["STRIPE_WEBHOOK_SECRETS"], archive=False)
+        entry = rot.load_state()["secrets"]["STRIPE_WEBHOOK_SECRETS"]
+        self.assertTrue(entry.get("finalizing"))
+        self.assertTrue((self.tmp / entry["finalizing"]["backup"]).exists())
+        self.assertEqual(rot.finalize(["STRIPE_WEBHOOK_SECRETS"], archive=False), 0)  # a re-run resumes
+
 
 if __name__ == "__main__":
     unittest.main()

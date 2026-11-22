@@ -617,7 +617,10 @@ class Rotator:
                 ok = self.verify(to_verify, started)
             except RotationError as e:
                 self.out(f"ERROR: {e}")
-            if not ok:
+            if ok:
+                for n in pending:  # now the services run the staged values: finalize may proceed
+                    self.update_state(n, unrolled=False)
+            else:
                 failures += 1
                 units: dict[str, list[str]] = {}
                 for n in pending:
@@ -727,7 +730,7 @@ class Rotator:
                 step="pending", kind=s.kind, staged_at=now.isoformat(), backup=backup.name,
                 backups=old.get("backups", []) + [backup.name], vars=p.touched, recreate=p.recreate, roll=p.roll,
                 grace_end=(now + s.grace).isoformat() if s.grace and p.extra.get("phase", 2) == 2 else None,
-                updated_at=now.isoformat(), **extra)
+                updated_at=now.isoformat(), unrolled=not roll, **extra)
             state["secrets"][s.name] = entry
         live_done = live_running = False
         try:
@@ -874,6 +877,8 @@ class Rotator:
             # credential reset to the old value, .env rewritten from the same backup, the roll itself),
             # and the new key file is only deleted after a successful roll.
             self.out(f"[{label}] ERROR: re-roll after rollback failed: {e}")
+            for n in names:  # migrate and finalize refuse until a rollback completes
+                self.update_state(n, rollback_incomplete=True)
             raise RotationError(
                 f"{label}: .env holds the OLD value but the services may still run the NEW one, and the state "
                 f"stays staged (or pending) with its backup. Re-run `rollback {retry}` once the rollout works") from None
@@ -886,11 +891,11 @@ class Rotator:
         if fallback and entry.get("phase") == 2:
             # Back to "introduced": old key primary, new key kept; its backup stays until finalize.
             self.update_state(name, step="staged", phase=1, backup=entry["b1"], vars=[s.fallback_var],
-                              grace_end=None)
+                              grace_end=None, rollback_incomplete=False)
             self.out(f"[{name}] rolled back to phase 1 ({reason}); the new key stays in {s.fallback_var}")
             return
         for n in names:
-            self.update_state(n, step="idle", backups=[], rolled_back_reason=reason)
+            self.update_state(n, step="idle", backups=[], rolled_back_reason=reason, rollback_incomplete=False)
         for n in names:
             self._unlink_unreferenced(entries[n].get("backups", [entries[n]["backup"]]))
             self.out(f"[{n}] rolled back ({reason})")
@@ -929,6 +934,10 @@ class Rotator:
                   if e.get("step") == "staged" and MANIFEST[n].migrate}
         if not staged:
             raise RotationError("nothing staged that needs a migrate")
+        stuck = [n for n, e in staged.items() if e.get("rollback_incomplete")]
+        if stuck:
+            raise RotationError(f"{', '.join(stuck)}: the last rollback did not finish and the services may still use "
+                                f"the new key: re-run `rollback {retry_name(stuck[0])}` first")
         half = [n for n, e in staged.items() if e.get("phase") != 2]
         if half:
             raise RotationError(f"{', '.join(half)}: phase 2 (promotion) is not complete: re-run `stage` first")
@@ -1022,6 +1031,12 @@ class Rotator:
         s, entry = MANIFEST[name], self.load_state()["secrets"].get(name, {})
         step = entry.get("step", "idle")
         next_step(step, "finalize")
+        if entry.get("unrolled"):
+            raise RotationError(f"{name} was staged by a --batch whose rollout and verify did not finish: run "
+                                f"`rollback {retry_name(name)}`, then stage it again (not overridable)")
+        if entry.get("rollback_incomplete"):
+            raise RotationError(f"the last rollback of {name} did not finish, so the services may still use the "
+                                f"new value: re-run `rollback {retry_name(name)}` first (not overridable)")
         if s.migrate and step != "migrated":
             raise RotationError("encrypted data not migrated yet: run `migrate` first (not overridable)")
         grace_end = entry.get("grace_end")
@@ -1096,6 +1111,7 @@ class Rotator:
                 if not journal:  # the journal was not saved: nothing refers to the plaintext copy
                     fin_backup.unlink(missing_ok=True)
                 raise
+            before = env
             try:
                 for var, val in edits.items():
                     env = set_env(env, var, val)
@@ -1105,9 +1121,16 @@ class Rotator:
                                     f"not be synced; the journal and {fin_backup.name} are kept. Run "
                                     f"`finalize {name}` again: it resumes from that file and rolls") from None
             except BaseException:
-                if not journal:  # .env is unchanged: undo the journal and drop the plaintext copy
+                try:  # an interrupt after the rename may have replaced .env: only an unchanged .env is safe to undo
+                    unchanged = self.env_text() == before
+                except OSError:
+                    unchanged = False
+                if not journal and unchanged:  # undo the journal and drop the plaintext copy
                     self.update_state(name, finalizing=None)
                     fin_backup.unlink(missing_ok=True)
+                elif not journal:
+                    self.out(f"[{name}] interrupted while .env was being written: the journal and "
+                             f"{fin_backup.name} are kept; run `finalize {name}` again to resume")
                 raise
             started = self.now()
             ok = False
