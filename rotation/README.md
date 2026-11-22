@@ -108,7 +108,7 @@ keeps the record and `status` shows `(finalize interrupted: run finalize)`. `rol
 Run `finalize <name>` again: it plans from the recorded copy, not from `.env`, so it never guesses what was dropped. It
 archives the retired values (again) unless you pass `--no-archive`, also when the first run used `--no-archive`. It accepts `.env` only if each edited
 variable holds its pre-finalize or its finalized value (otherwise: fix by hand), edits, rolls, verifies and records
-`finalized`. A retired OIDC PEM that the first run archived and deleted is skipped. A one-shot secret has no `.env`
+`finalized`. A retired OIDC PEM that the first run archived and deleted is skipped (`no retired value left to archive`, no new archive file). A one-shot secret has no `.env`
 edit: its re-run archives the old value from the stage backup again (harmless) and then deletes the backup.
 
 ### Bundles

@@ -976,7 +976,9 @@ class Rotator:
                     raise RotationError(f"{var} was edited since the interrupted finalize; fix by hand "
                                         f"(the pre-finalize values are in {journal['backup']})")
         # 1. Archive FIRST: a failure here leaves .env, the state and the backups untouched.
-        if recipient:
+        if not retired:  # e.g. an OIDC resume: the interrupted run archived and deleted the PEM
+            self.out(f"[{name}] no retired value left to archive")
+        elif recipient:
             where = self.archive(recipient, name, retired)
             self.out(f"[{name}] archived {len(retired)} retired value(s) to {where.relative_to(self.base)}")
         else:

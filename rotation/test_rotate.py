@@ -1543,8 +1543,11 @@ class FinalizeRecoveryTests(Base):
         self.advance(days=31)
         self.killed_before_the_state_update(rot, "OIDC_SIGNING_KEY_PATH")
         self.assertFalse((self.tmp / "certs" / "oidc.pem").exists())  # archived, then deleted
+        archives = sorted((self.tmp / "rotation" / "archive").glob("*.age"))
         rot = self.make()
         self.assertEqual(rot.finalize(["OIDC_SIGNING_KEY_PATH"]), 0)
+        self.assertIn("no retired value left to archive", "\n".join(self.out))
+        self.assertEqual(sorted((self.tmp / "rotation" / "archive").glob("*.age")), archives)  # no empty archive
         self.assertEqual(rot.step_of("OIDC_SIGNING_KEY_PATH"), "finalized")
         self.assertEqual(self.env("OIDC_SIGNING_KEYS_INACTIVE_PATHS"), "")
         self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
