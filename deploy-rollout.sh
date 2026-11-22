@@ -94,10 +94,10 @@ deploy() {
         docker rollout -t 120 celery_default
 
         echo -e "${YELLOW}Restarting beat (cannot run two instances)...${NC}"
-        docker compose up -d --force-recreate beat
+        docker compose up -d --no-deps --force-recreate beat
 
         echo -e "${YELLOW}Restarting telegram (cannot run two instances)...${NC}"
-        docker compose up -d --force-recreate telegram
+        docker compose up -d --no-deps --force-recreate telegram
     else
         echo -e "${GREEN}Backend image unchanged — skipping web/celery_default/beat/telegram.${NC}"
     fi
@@ -144,7 +144,7 @@ roll() {
     local defined bad=0
     defined=$(docker compose --profile '*' config --services)
     for svc in "${svcs[@]}"; do
-        if ! grep -qx "$svc" <<<"$defined"; then
+        if ! grep -Fqx -- "$svc" <<<"$defined"; then
             echo -e "${RED}Unknown service: $svc (not defined in docker-compose.yml).${NC}" >&2
             bad=1
         fi
@@ -153,7 +153,7 @@ roll() {
 
     active=$(docker compose config --services)
     for svc in "${svcs[@]}"; do
-        if ! grep -qx "$svc" <<<"$active"; then
+        if ! grep -Fqx -- "$svc" <<<"$active"; then
             echo -e "${YELLOW}Skipping $svc (defined, but not in the active compose profiles).${NC}"
             continue
         fi

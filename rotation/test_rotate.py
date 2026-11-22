@@ -860,6 +860,18 @@ class RollScriptTests(unittest.TestCase):
         self.assertIn("celery_defualt", res.stdout + res.stderr)
         self.assertNotIn("rollout", log)
 
+    @unittest.skipUnless(shutil.which("bash"), "bash needed")
+    def test_service_names_are_matched_literally_not_as_patterns(self) -> None:
+        res, log = self.run_roll("web", "celery_default.*")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertNotIn("rollout", log)  # web was not rolled before the bad name was rejected
+
+    def test_deploy_recreates_beat_and_telegram_without_their_dependencies(self) -> None:
+        text = (Path(__file__).resolve().parent.parent / "deploy-rollout.sh").read_text()
+        for svc in ("beat", "telegram"):
+            self.assertIn(f"docker compose up -d --no-deps --force-recreate {svc}\n", text)
+            self.assertNotIn(f"docker compose up -d --force-recreate {svc}\n", text)
+
 
 class ReviewRound4Tests(Base):
     # 1. Telegram is forward-only
@@ -1822,3 +1834,39 @@ class ReviewRound1Tests(Base):
         self.assertEqual(rot.stage(["STRIPE_SECRET_KEY"]), 0)
         self.assertEqual(self.env("STRIPE_SECRET_KEY"), "sk_new")
         self.assertNotIn("nothing to rotate", "\n".join(self.out))
+
+
+class PushoverForwardOnlyTests(Base):
+    def setUp(self) -> None:
+        super().setUp()
+        (self.tmp / ".env").write_text(ENV + "PUSHOVER_USER_KEY=pu_old\nPUSHOVER_APP_TOKEN=pa_old\n")
+
+    def test_user_key_is_forward_only_and_app_token_is_not(self) -> None:
+        self.assertFalse(mf.MANIFEST["PUSHOVER_USER_KEY"].reversible)
+        self.assertTrue(mf.MANIFEST["PUSHOVER_APP_TOKEN"].reversible)
+        self.assertNotIn("PUSHOVER_USER_KEY", r.select([], "thirdparty"))  # by name only, like Telegram
+        self.assertIn("PUSHOVER_APP_TOKEN", r.select([], "thirdparty"))
+
+    def test_user_key_needs_its_own_typed_confirmation(self) -> None:
+        rot = self.make(prompts=["pu_new"], files=[r.TELEGRAM_CONFIRM_PHRASE])
+        self.assertEqual(rot.stage(["PUSHOVER_USER_KEY"]), 1)
+        self.assertEqual(self.env("PUSHOVER_USER_KEY"), "pu_old")
+
+    def test_failed_verify_keeps_the_new_user_key(self) -> None:
+        rot = self.make(prompts=["pu_new"], files=[r.PUSHOVER_CONFIRM_PHRASE], fail=lambda l: l.endswith("manage.py check"))
+        self.assertEqual(rot.stage(["PUSHOVER_USER_KEY"]), 1)
+        self.assertEqual(self.env("PUSHOVER_USER_KEY"), "pu_new")  # the old key is dead: never restored
+        self.assertIn("NOT rolled back", "\n".join(self.out))
+        self.assertEqual(rot.step_of("PUSHOVER_USER_KEY"), "staged")
+        with self.assertRaises(r.RotationError):
+            rot.rollback("PUSHOVER_USER_KEY")
+        self.assertEqual(self.env("PUSHOVER_USER_KEY"), "pu_new")
+
+    def test_failed_verify_still_rolls_the_app_token_back(self) -> None:
+        rot = self.make(prompts=["pa_new"], fail=lambda l: l.endswith("manage.py check"))
+        self.assertEqual(rot.stage(["PUSHOVER_APP_TOKEN"]), 1)
+        self.assertEqual(self.env("PUSHOVER_APP_TOKEN"), "pa_old")
+
+    def test_user_key_is_refused_in_batch(self) -> None:
+        with self.assertRaises(r.RotationError):
+            self.make(prompts=["pu_new"]).stage(["PUSHOVER_USER_KEY"], batch=True)

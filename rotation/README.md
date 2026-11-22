@@ -12,6 +12,9 @@ ssh -t revel 'cd infra && ./rotation/rotate.py status'
 
 `-t` is needed: the tool prompts (hidden input) for third-party values and confirmations.
 
+`stage`, `migrate`, `finalize` and `rollback` hold an exclusive lock on `rotation/state.lock` for the whole command (prompts
+included). A second one fails at once with `another rotate.py command ... is running`. `plan`, `status`, `check` and `verify` do not lock.
+
 ## Prerequisites
 
 - `python3` >= 3.10 on the host (no third-party packages).
@@ -38,11 +41,11 @@ ssh -t revel 'cd infra && ./rotation/rotate.py status'
 | `migrate` | `rotate_encrypted_fields`, then `rotate_encrypted_fields --verify`, for staged `SECRET_KEY` / `SALT_KEY`. |
 | `verify` | Health, API, frontend, `manage.py check`, error-line budget (below). |
 | `finalize <name...> [--force] [--no-archive]` | After the grace window. Order: trial-encrypt to the recipient, **archive the retired values with `age`**, then record a copy of `.env` in the state (the finalize journal), edit `.env`, roll, verify, then delete the run's `.env.bak.*` (and, for OIDC, the retired PEM, only if it was archived and sits inside `certs/`). An archive failure leaves `.env`, the state and the backups untouched. If verify fails after the edit, the old values are restored, the plaintext copy is deleted and the roll is repeated; if that roll fails too the tool says the services are out of sync and prints the command to re-roll. If `.env` itself cannot be restored, the copy and the journal are kept and the error names the copy: do not delete it; fix the cause and run `finalize <name>` again, which resumes from it. A `finalize` that was killed is also resumed by running it again (see the journal section below). |
-| `rollback <name...>` | Restore the secret's previous values from its backup (while `staged` or `pending`). See the rollback rule below; `TELEGRAM_BOT_TOKEN` is forward-only: `rollback` refuses it while `staged`, and for a `pending` entry it only resolves the journal (it never restores the revoked token; see the Telegram section). A bundle is rolled back as a whole: name the bundle (`rollback aws`) or every member. Members already rolled back are skipped, so the same command retries a bundle that got stuck halfway. |
+| `rollback <name...>` | Restore the secret's previous values from its backup (while `staged` or `pending`). See the rollback rule below; `TELEGRAM_BOT_TOKEN` and `PUSHOVER_USER_KEY` are forward-only: `rollback` refuses them while `staged`, and for a `pending` entry it only resolves the journal (it never restores the revoked token; see the Telegram section). A bundle is rolled back as a whole: name the bundle (`rollback aws`) or every member. Members already rolled back are skipped, so the same command retries a bundle that got stuck halfway. |
 
 Groups: `self` = `SECRET_KEY`, `SALT_KEY`, OIDC key, Grafana password. `thirdparty` = everything
-rolled in a provider console, plus `STRIPE_WEBHOOK_SECRETS`, except `TELEGRAM_BOT_TOKEN`. `DB_PASSWORD` and
-`TELEGRAM_BOT_TOKEN` are in no group: they are staged by name only. The legacy `STRIPE_WEBHOOK_SECRET` is in no group
+rolled in a provider console, plus `STRIPE_WEBHOOK_SECRETS`, except `TELEGRAM_BOT_TOKEN` and `PUSHOVER_USER_KEY`. `DB_PASSWORD`,
+`TELEGRAM_BOT_TOKEN` and `PUSHOVER_USER_KEY` are in no group: they are staged by name only. The legacy `STRIPE_WEBHOOK_SECRET` is in no group
 either and `stage` refuses it (`plan` shows `via STRIPE_WEBHOOK_SECRETS`): roll `STRIPE_WEBHOOK_SECRETS`, which is seeded
 from it (only when the list is empty) and keeps it valid for the grace period. `finalize` drops the old list items but leaves
 the legacy `STRIPE_WEBHOOK_SECRET` line in `.env`: it is simply unused while the list is set, and you may remove it by hand.
@@ -123,7 +126,7 @@ States per secret: `idle|finalized -> pending -> staged -> (migrated) -> finaliz
 One-shot secrets (a Stripe key, a token) sit in `staged` until you `finalize` them, which archives
 the old value and deletes the plaintext `.env.bak.*`; do this once the old credential is revoked.
 
-### Forward-only: `TELEGRAM_BOT_TOKEN`
+### Forward-only: `TELEGRAM_BOT_TOKEN`, `PUSHOVER_USER_KEY`
 
 BotFather `/revoke` kills the old token the moment you do it, so the old value cannot be restored.
 `stage TELEGRAM_BOT_TOKEN` (by name, never in a group or `--batch`) asks you to type
@@ -134,6 +137,10 @@ If `stage` was killed and left it `pending`, `rollback TELEGRAM_BOT_TOKEN` only 
 the revoked token: if `.env` holds the new token the entry becomes `staged` and the tool prints the manual recovery
 (check `.env`, `./deploy-rollout.sh roll telegram`, `rotate.py verify`); if `.env` is unchanged the new token was lost
 with the process, the entry goes back to `idle` and its backup is deleted, so get a fresh token and `stage` again.
+
+`PUSHOVER_USER_KEY` works the same way: the Pushover dashboard reset kills the old key at once. `stage PUSHOVER_USER_KEY`
+asks you to type `PUSHOVER RESET` once you have reset it, then for the new key; a failed `verify` keeps the new key.
+`PUSHOVER_APP_TOKEN` is reversible: the old application keeps working until you delete it, so a failed `verify` rolls it back.
 
 ### Verify
 
@@ -176,9 +183,9 @@ so the grace windows overlap.
 3. Third parties, in parallel with the windows running: follow each secret's printed console steps.
    `rotate.py stage --group thirdparty --batch` (Stripe key and webhook secrets, Brevo SMTP key,
    Google OAuth secrets, GCP service-account key, Cloudflare token, LLM / Hugging Face / IP2Location
-   keys, Pushover, Discord, IndexNow, Eventbrite; not Telegram). At each hidden prompt paste the new
+   keys, the Pushover app token, Discord, IndexNow, Eventbrite; not Telegram and not the Pushover user key). At each hidden prompt paste the new
    value, or press Enter to skip that secret (its console step is not done yet). One `--batch` rolls once.
-4. `rotate.py stage TELEGRAM_BOT_TOKEN` last, by name (it is in no group). It is NOT reversible: revoke in BotFather first, then type `TELEGRAM REVOKED` and paste the new token. A failed verify keeps the new token and prints manual recovery steps. Only `telegram` restarts.
+4. `rotate.py stage TELEGRAM_BOT_TOKEN` last, by name (it is in no group; `PUSHOVER_USER_KEY` is staged the same way, by name). It is NOT reversible: revoke in BotFather first, then type `TELEGRAM REVOKED` and paste the new token. A failed verify keeps the new token and prints manual recovery steps. Only `telegram` restarts.
 5. `DB_PASSWORD` (below), in its window.
 6. `rotate.py stage OIDC_SIGNING_KEY_PATH`. Skipped automatically when unset.
 7. After the grace windows, run `rotate.py status` and finalize only the names it shows as `staged` or
@@ -201,11 +208,14 @@ so changing `.env` alone does nothing.
 ssh -t revel 'cd infra && ./rotation/rotate.py stage DB_PASSWORD --maintenance'
 ```
 
-You must type `ROTATE DB PASSWORD`. The tool then: backs up `.env`; runs `ALTER ROLE <DB_USER> PASSWORD ...`
+You must type `ROTATE DB PASSWORD`. The tool then: backs up `.env` and records the `pending` journal entry (both
+synced to disk); writes `DB_PASSWORD` to `.env` FIRST; only then runs `ALTER ROLE <DB_USER> PASSWORD ...`
 through `psql` in `revel_postgres` with a SCRAM-SHA-256 verifier computed on the host (stdin, never argv;
-the plaintext never reaches the server, whose `log_min_error_statement` would write a failed statement to its log); writes `DB_PASSWORD`; recreates
-`pgbouncer` and `postgres-exporter` (`up -d --no-deps --force-recreate`); rolls `web`, `celery_default`,
-`beat`, `telegram`; verifies. On failure it sets the old password back and rolls again. Expect a few
+the plaintext never reaches the server, whose `log_min_error_statement` would write a failed statement to its log);
+recreates `pgbouncer` and `postgres-exporter` (`up -d --no-deps --force-recreate`); rolls `web`, `celery_default`,
+`beat`, `telegram`; verifies. On failure it sets the old password back and rolls again. A kill after the `.env`
+write and before `ALTER ROLE` leaves the entry `pending` with the new password only in `.env`; `rollback DB_PASSWORD` is safe in
+both cases. Expect a few
 seconds of errors while the pooler restarts: schedule it for a quiet hour.
 
 `docker-compose.yml` feeds `DB_PASSWORD` to `revel_postgres` as `POSTGRES_PASSWORD`, so the next full
@@ -246,7 +256,8 @@ retired values are in `rotation/archive/*.age`.
    env = Path(".env")
    text, found = env.read_text(), 0
    for key in ("SECRET_KEY", "SALT_KEY"):
-       retired = list(dict.fromkeys(v for line in lines if (v := get_env(line, key))))
+       prefix = key + "="  # archive records hold the value verbatim: no quoting, no comment stripping
+       retired = list(dict.fromkeys(line[len(prefix):] for line in lines if line.startswith(prefix) and line[len(prefix):]))
        current = [v for v in (get_env(text, f"{key}_FALLBACKS") or "").split(",") if v]
        if retired:
            text = set_env(text, f"{key}_FALLBACKS", ",".join(current + [v for v in retired if v not in current]))
@@ -263,7 +274,8 @@ retired values are in `rotation/archive/*.age`.
 4. `docker compose exec -T web python manage.py rotate_encrypted_fields`, then `... --verify`.
 5. Remove the retired values from the two `*_FALLBACKS` variables again and roll.
 
-Each `finalize` writes its own age file, created exclusively with mode 0600 (UTC): `<YYYY-MM-DD>.age`, or
+Each `finalize` writes its own age file (mode 0600, UTC). `age` writes to a hidden `.archive-*.part` file; the file is synced and
+linked under its final name only when it is complete, so no `*.age` file is ever partial. Names: `<YYYY-MM-DD>.age`, or
 `<YYYY-MM-DD-HHMMSS>-<NAME>.age` when that exists, or `<YYYY-MM-DD-HHMMSS>-<NAME>-<N>.age` when that exists too.
 age streams cannot be concatenated, so nothing is appended. Archived OIDC keys appear as
 `OIDC_SIGNING_KEY_FILE:<path>=<base64 PEM>`. Back the archive up off the host.

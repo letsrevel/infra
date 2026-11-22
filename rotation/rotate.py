@@ -37,6 +37,8 @@ import manifest as mf  # noqa: E402
 MANIFEST = mf.MANIFEST
 DB_CONFIRM_PHRASE = "ROTATE DB PASSWORD"
 TELEGRAM_CONFIRM_PHRASE = "TELEGRAM REVOKED"
+PUSHOVER_CONFIRM_PHRASE = "PUSHOVER RESET"
+FORWARD_ONLY_PHRASES = {"TELEGRAM_BOT_TOKEN": TELEGRAM_CONFIRM_PHRASE, "PUSHOVER_USER_KEY": PUSHOVER_CONFIRM_PHRASE}
 SECRET_LOOKING = re.compile(r"SECRET|TOKEN|KEY|PASSWORD|WEBHOOK_URL")
 # Structured (structlog JSON) level, or an uppercase level word in a plain line. Never a bare "error".
 ERROR_LINE = re.compile(r'(?i:"level"\s*:\s*"(?:error|critical)")|\b(?:ERROR|CRITICAL)\b')
@@ -438,8 +440,8 @@ class Rotator:
             self.out(s.instructions)
             if not s.reversible:
                 self.out(f"{s.name} CANNOT be rolled back: the provider revokes the old value at once.")
-                if self.prompt(f"Type '{TELEGRAM_CONFIRM_PHRASE}' once you have revoked the old token: ") \
-                        != TELEGRAM_CONFIRM_PHRASE:
+                phrase = FORWARD_ONLY_PHRASES[s.name]
+                if self.prompt(f"Type '{phrase}' once you have revoked the old value: ") != phrase:
                     raise RotationError("confirmation phrase mismatch, aborted")
             val = self.prompt_secret(f"New value for {s.name} (hidden, empty = skip): ")
             if not val.strip():
@@ -544,7 +546,8 @@ class Rotator:
             raise RotationError("DB_PASSWORD is staged alone (no other secrets, no --batch): "
                                 "ALTER ROLE, recreate pgbouncer/postgres-exporter, roll the app")
         if batch and any(not MANIFEST[n].reversible for n in names):
-            raise RotationError("forward-only secrets (TELEGRAM_BOT_TOKEN) are staged by name, without --batch")
+            raise RotationError("forward-only secrets (TELEGRAM_BOT_TOKEN, PUSHOVER_USER_KEY) are staged by name, "
+                                "without --batch")
         if any(MANIFEST[n].kind == mf.GENERATED_WITH_FALLBACK for n in names):
             self.require_fallback_support()
         before = self.load_state()["secrets"] if batch else {}
@@ -813,7 +816,7 @@ class Rotator:
                 return
             if not s.reversible:
                 raise RotationError(f"{name} cannot be rolled back: the old value was revoked at the provider "
-                                    "(BotFather /revoke). Fix forward: re-issue a token, put it in .env, "
+                                    "(BotFather /revoke, Pushover reset). Fix forward: re-issue it, put it in .env, "
                                     f"`./deploy-rollout.sh roll {' '.join(s.services)}`")
             if s.kind == mf.GENERATED_WITH_FALLBACK and entry.get("phase") == 1 and entry.get("ever_primary"):
                 raise RotationError("the new key has been primary: it stays in the fallbacks. Re-run `stage` to "
