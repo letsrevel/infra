@@ -232,7 +232,7 @@ retired values are in `rotation/archive/*.age`.
 
 1. From the infra root, copy the retired keys into the `*_FALLBACKS` variables of `.env`. Pass **every** archive in
    `rotation/archive/*.age`. That is the safe default: a retired value the dump does not need is harmless as a
-   fallback, and step 5 removes them again. Do not filter by the date in a file name or by file mtime: names are
+   fallback, and step 6 removes them again. Do not filter by the date in a file name or by file mtime: names are
    UTC while backups use host-local time, the first archive of a day carries no time, and copying the archive off
    the host resets mtimes. If you must narrow the list, keep every file dated from the day *before* the backup
    onwards. `finalize` writes one file per secret,
@@ -272,10 +272,14 @@ retired values are in `rotation/archive/*.age`.
    PY
    )
    ```
-2. Restore the dump.
-3. Roll: `./deploy-rollout.sh roll web celery_default beat telegram`.
-4. `docker compose exec -T web python manage.py rotate_encrypted_fields`, then `... --verify`.
-5. Remove the retired values from the two `*_FALLBACKS` variables again and roll.
+2. Stop every writer first: `docker compose stop web celery_default beat telegram`. Keep users off the site (your
+   maintenance page, if you use one). A writer that reads a restored row without the retired keys can save it back
+   corrupted (see above).
+3. Restore the dump.
+4. Start the writers on the new `.env`: `docker compose up -d --no-deps web celery_default beat telegram`.
+5. `docker compose exec -T web python manage.py rotate_encrypted_fields`, then `... --verify`. Keep the site closed
+   until `--verify` succeeds. If it fails, do NOT remove the fallbacks: fix the cause and run it again.
+6. Remove the retired values from the two `*_FALLBACKS` variables again and roll: `./deploy-rollout.sh roll web celery_default beat telegram`.
 
 Each `finalize` writes its own age file (mode 0600, UTC). `age` writes to a hidden `.archive-*.part` file; the file is synced and
 linked under its final name only when it is complete, so no `*.age` file is ever partial. Names: `<YYYY-MM-DD>.age`, or
