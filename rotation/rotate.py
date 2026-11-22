@@ -321,7 +321,13 @@ class Rotator:
         prefix = "/app/certs/"
         if not container_path.startswith(prefix) or ".." in container_path:
             raise RotationError(f"{container_path}: only files under {prefix} (the ./certs mount) are supported")
-        return self.base / "certs" / container_path[len(prefix):]
+        suffix = container_path[len(prefix):]
+        if suffix.startswith("/"):  # an absolute suffix would replace the certs dir in the join
+            raise RotationError(f"{container_path}: only files under {prefix} (the ./certs mount) are supported")
+        path = self.base / "certs" / suffix
+        if (self.base / "certs").resolve() not in path.resolve().parents:  # a symlink may leave the mount
+            raise RotationError(f"{container_path} resolves outside {self.base}/certs: refusing")
+        return path
 
     # ---- docker
     def compose(self, *args: str, input_text: str | None = None) -> Any:

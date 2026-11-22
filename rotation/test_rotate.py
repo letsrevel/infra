@@ -1919,5 +1919,17 @@ class PushoverForwardOnlyTests(Base):
             self.make(prompts=["pu_new"]).stage(["PUSHOVER_USER_KEY"], batch=True)
 
 
+class CodeRabbitRound3Tests(Base):
+    def test_host_path_stays_inside_certs(self) -> None:
+        rot = self.make()
+        self.assertEqual(rot.host_path("/app/certs/oidc.pem"), self.tmp / "certs" / "oidc.pem")
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        (self.tmp / "certs" / "link").symlink_to(outside)
+        for bad in ("/app/certs//etc/passwd", "/app/certs/link/x.pem", "/app/certs/../x"):
+            with self.assertRaises(r.RotationError, msg=bad):
+                rot.host_path(bad)
+
+
 if __name__ == "__main__":
     unittest.main()
