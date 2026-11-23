@@ -35,12 +35,14 @@ install_rollout() {
 # that differs from the local tag's image. Used so a `deploy` that was cut short, or a
 # `pull` done by hand, is still finished by the next `deploy`.
 component_behind() {
-    local ref=$1 cid want svc
+    local ref=$1 cid ids want svc
     shift
     want=$(image_id "$ref")
     [ -n "$want" ] || return 1
     for svc in "$@"; do
-        for cid in $(docker compose ps -a -q "$svc"); do
+        # A failed `ps` must stop the deploy: an empty list would read as "not behind".
+        ids=$(docker compose ps -a -q "$svc") || { echo -e "${RED}docker compose ps failed for $svc${NC}" >&2; exit 1; }
+        for cid in $ids; do
             [ "$(docker inspect --format '{{.Image}}' "$cid")" != "$want" ] && return 0
         done
     done
@@ -177,10 +179,22 @@ roll() {
 
     # A local tag that moved since the containers were created (a `deploy` that pulled and then stopped before
     # its migrate/roll) would ship new code without its migrations: refuse and let `deploy` finish first.
-    local cid ref stale=0
+    local cid cids running ref stale=0
     for svc in "${svcs[@]}"; do
         grep -Fqx -- "$svc" <<<"$active" || continue
-        for cid in $(docker compose ps -a -q "$svc"); do
+        cids=$(docker compose ps -a -q "$svc") || { echo -e "${RED}docker compose ps failed for $svc${NC}" >&2; return 1; }
+        # docker-rollout replaces the stopped replica of a mixed set and leaves the running one on its old
+        # environment, so a rotation would look rolled while a replica still holds the old values.
+        case "$svc" in
+            web | celery_default | frontend)
+                running=$(docker compose ps -q "$svc") || { echo -e "${RED}docker compose ps failed for $svc${NC}" >&2; return 1; }
+                if [ -n "$running" ] && [ "$(wc -w <<<"$running")" -ne "$(wc -w <<<"$cids")" ]; then
+                    echo -e "${RED}$svc has running and stopped replicas: roll would leave a running replica on the old .env. Remove the stopped container ('docker compose ps -a', then 'docker rm <id>') and re-run roll.${NC}" >&2
+                    stale=1
+                fi
+                ;;
+        esac
+        for cid in $cids; do
             ref=$(docker inspect --format '{{.Config.Image}}' "$cid") || {
                 echo -e "${RED}$svc: container changed during the check; re-run roll.${NC}" >&2
                 return 1

@@ -880,7 +880,7 @@ class DeployScriptTextTests(unittest.TestCase):
 
     def test_roll_check_covers_stopped_containers_and_only_the_migration_images(self) -> None:
         self.assertIn('docker compose ps -a -q "$svc"', self.text)
-        self.assertNotIn('docker compose ps -q "$svc"', self.text)
+        self.assertIn('cids=$(docker compose ps -a -q "$svc")', self.text)  # the stale-image loop lists all containers
         self.assertIn('case "$ref" in "$IMAGE_BACKEND" | "$IMAGE_FRONTEND") ;; *) continue ;; esac', self.text)
 
     def test_roll_refusal_names_deploy_and_a_vanished_container_is_reported(self) -> None:
@@ -2058,6 +2058,62 @@ class CodeRabbitRound3Tests(Base):
         self.assertEqual(rot.stage(["CANARY_PASSWORD"]), 1)
         self.assertEqual(self.env("CANARY_PASSWORD"), "cp_new")  # the app already has it: never restored
         self.assertIn("NOT rolled back", "\n".join(self.out))
+
+
+class CodeRabbitRound5ScriptTests(unittest.TestCase):
+    script = Path(__file__).resolve().parent.parent / "deploy-rollout.sh"
+
+    def stub_docker(self, **env: str):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        stub = tmp / "docker"
+        stub.write_text('#!/bin/sh\necho "$*" >> "$LOG"\ncase "$*" in\n'
+                        '"compose --profile * config --services") printf "web\\ncelery_default\\n" ;;\n'
+                        '"compose config --services") printf "web\\ncelery_default\\n" ;;\n'
+                        '"compose ps -a -q web") [ -n "$PS_FAIL" ] && exit 1; printf "$PS_ALL" ;;\n'
+                        '"compose ps -q web") printf "$PS_RUN" ;;\nesac\n')
+        stub.chmod(0o755)
+        return tmp, dict(os.environ, PATH=f"{tmp}:{os.environ['PATH']}", LOG=str(tmp / "log"), **env)
+
+    def roll(self, **env: str):
+        import subprocess
+        tmp, full = self.stub_docker(**env)
+        res = subprocess.run(["bash", str(self.script), "roll", "web"], env=full, capture_output=True, text=True)
+        log = (tmp / "log").read_text() if (tmp / "log").exists() else ""
+        return res, log
+
+    @unittest.skipUnless(shutil.which("bash"), "bash needed")
+    def test_roll_stops_when_ps_fails(self) -> None:
+        res, log = self.roll(PS_FAIL="1")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("docker compose ps failed for web", res.stderr)
+        self.assertNotIn("rollout", log)
+
+    @unittest.skipUnless(shutil.which("bash"), "bash needed")
+    def test_roll_refuses_running_and_stopped_replicas_together(self) -> None:
+        res, log = self.roll(PS_ALL="c1\\nc2\\n", PS_RUN="c1\\n")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("running and stopped replicas", res.stderr)
+        self.assertNotIn("rollout", log)
+
+    @unittest.skipUnless(shutil.which("bash"), "bash needed")
+    def test_roll_accepts_all_running_and_all_stopped(self) -> None:
+        for env in ({"PS_ALL": "c1\\nc2\\n", "PS_RUN": "c1\\nc2\\n"}, {"PS_ALL": "c1\\n", "PS_RUN": ""}):
+            res, log = self.roll(**env)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertIn("rollout -t 120 web", log)
+
+    @unittest.skipUnless(shutil.which("bash"), "bash needed")
+    def test_component_behind_stops_the_deploy_when_ps_fails(self) -> None:
+        import subprocess
+        _, full = self.stub_docker(PS_FAIL="1")
+        code = ('RED= NC=; image_id() { echo want; }; '
+                f'eval "$(sed -n \'/^component_behind()/,/^}}/p\' {self.script})"; '
+                'component_behind img web && echo BEHIND; echo REACHED')
+        res = subprocess.run(["bash", "-c", code], env=full, capture_output=True, text=True)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertNotIn("REACHED", res.stdout)
+        self.assertIn("docker compose ps failed for web", res.stderr)
 
 
 if __name__ == "__main__":

@@ -234,6 +234,11 @@ To recover, run `./deploy-rollout.sh deploy`. It rolls every component whose con
 even when the pull brings nothing new. It applies the migrations through the web rollout and rolls the rest.
 Then run `roll` again.
 
+`roll` also refuses a `web`, `celery_default` or `frontend` that has running and stopped replicas together:
+`docker rollout` would replace only the stopped one and leave the running replica on its old `.env`. Remove the
+stopped container (`docker compose ps -a`, then `docker rm <id>`) and run `roll` again. `roll` and `deploy` stop
+when `docker compose ps` fails for a service.
+
 ## Disaster recovery: restoring a pre-rotation backup
 
 Columns in an old dump are encrypted under the `SECRET_KEY` x `SALT_KEY` of that time, and the
