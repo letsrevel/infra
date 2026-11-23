@@ -119,7 +119,7 @@ edit: its re-run archives the old value from the stage backup again (harmless) a
 Credentials that only work as a set are staged atomically, with one backup and one roll, and
 rolled back together: `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (`aws`), and
 `APPLE_WALLET_CERT_PATH` + `APPLE_WALLET_KEY_PATH` + `APPLE_WALLET_KEY_PASSWORD` (`apple_wallet`).
-Naming only some members is an error that names the bundle. If a required member is unset in `.env` the whole bundle is skipped (`skipped bundle <name>: <member> is unset, nothing was changed`); only optional members (`APPLE_WALLET_KEY_PASSWORD`, a key may have no password) may be unset.
+Naming only some members is an error that names the bundle. If a required member is unset in `.env` the whole bundle is skipped (`skipped bundle <name>: <member> is unset, nothing was changed`); only optional members (`APPLE_WALLET_KEY_PASSWORD`, a key may have no password) may be unset. The optional member is always asked, even when it is empty in `.env`: Enter there means "the new key has no password" (it clears an old one) and never skips the bundle.
 
 States per secret: `idle|finalized -> pending -> staged -> (migrated) -> finalized` (`pending` is the journal entry during `stage`), `pending -> idle` and `staged -> idle` on rollback; for forward-only secrets `pending` resolves as described below.
 `SECRET_KEY` and `SALT_KEY` cannot finalize before `migrate` (not even with `--force`).

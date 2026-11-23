@@ -541,6 +541,16 @@ class Rotator:
                           before=lambda: self._grafana_reset(new))
         raise RotationError(f"unknown kind {k}")
 
+    def _prepare_optional(self, s: mf.Secret, env: str) -> Staged | None:
+        """A bundle member that may be empty: empty input means "the new value is empty", never "skip the bundle"."""
+        self.out(s.instructions)
+        val = self.prompt_secret(f"New {s.name} (hidden, empty = none): ").strip()
+        if re.search(r"[\r\n\x00]", val):
+            raise RotationError("value contains a newline")
+        if val == (get_env(env, s.name) or ""):
+            return None
+        return Staged({s.name: val}, [s.name], list(s.services))
+
     def _prepare_db(self, s: mf.Secret, env: str) -> Staged:
         if not self.maintenance:
             raise RotationError("DB_PASSWORD is a maintenance-window rotation (NOT zero-downtime): pass --maintenance")
@@ -709,6 +719,11 @@ class Rotator:
                 self.out(f"skipped bundle {s.bundle}: {s.name} is unset, nothing was changed")
                 return []
         for s in secs:
+            if s.optional:  # e.g. a key password: asked even when the old one is empty, since the new key may need one
+                self.out(f"[{s.name}] staging ({s.kind})")
+                if (plan := self._prepare_optional(s, env)) is not None:
+                    plans.append((s, plan))
+                continue
             if not get_env(env, s.name) and s.kind != mf.LIST_APPEND:
                 self.out(f"[{s.name}] unset: nothing to rotate, skipped")
                 continue

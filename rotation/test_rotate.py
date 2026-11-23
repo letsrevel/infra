@@ -948,12 +948,35 @@ class ReviewRound4Tests(Base):
         for n in ("c1.pem", "k1.pem"):
             (self.tmp / "certs" / n).write_text("x")
             os.chmod(self.tmp / "certs" / n, 0o644)
-        rot = self.make(files=["/app/certs/c1.pem", "/app/certs/k1.pem"])
+        rot = self.make(prompts=[""], files=["/app/certs/c1.pem", "/app/certs/k1.pem"])  # "" = no password
         names = ["APPLE_WALLET_CERT_PATH", "APPLE_WALLET_KEY_PATH", "APPLE_WALLET_KEY_PASSWORD"]
         self.assertEqual(rot.stage(names), 0)
         self.assertEqual(self.env("APPLE_WALLET_CERT_PATH"), "/app/certs/c1.pem")
         self.assertEqual(self.env("APPLE_WALLET_KEY_PATH"), "/app/certs/k1.pem")
         self.assertEqual(self.env("APPLE_WALLET_KEY_PASSWORD"), "")
+
+    def apple_stage(self, old_password: str, prompts: list[str]) -> r.Rotator:
+        (self.tmp / ".env").write_text(ENV + "APPLE_WALLET_CERT_PATH=/app/certs/c0.pem\n"
+                                       f"APPLE_WALLET_KEY_PATH=/app/certs/k0.pem\nAPPLE_WALLET_KEY_PASSWORD={old_password}\n")
+        for n in ("c1.pem", "k1.pem"):
+            (self.tmp / "certs" / n).write_text("x")
+            os.chmod(self.tmp / "certs" / n, 0o644)
+        rot = self.make(prompts=prompts, files=["/app/certs/c1.pem", "/app/certs/k1.pem"])
+        names = ["APPLE_WALLET_CERT_PATH", "APPLE_WALLET_KEY_PATH", "APPLE_WALLET_KEY_PASSWORD"]
+        self.assertEqual(rot.stage(names), 0)
+        return rot
+
+    def test_apple_wallet_password_is_asked_when_the_old_one_is_empty(self) -> None:
+        self.apple_stage("", ["new-key-pass"])
+        self.assertEqual(self.env("APPLE_WALLET_KEY_PATH"), "/app/certs/k1.pem")
+        self.assertEqual(self.env("APPLE_WALLET_KEY_PASSWORD"), "new-key-pass")
+
+    def test_apple_wallet_empty_password_clears_an_old_one_and_does_not_skip_the_bundle(self) -> None:
+        rot = self.apple_stage("old-pass", [""])
+        self.assertEqual(self.env("APPLE_WALLET_KEY_PATH"), "/app/certs/k1.pem")
+        self.assertEqual(self.env("APPLE_WALLET_KEY_PASSWORD"), "")
+        rot.rollback_unit(list(mf.BUNDLES["apple_wallet"]))  # the bundle still rolls back as a whole
+        self.assertEqual(self.env("APPLE_WALLET_KEY_PASSWORD"), "old-pass")
 
     # 3. finalize of an idle name
     def test_finalize_of_idle_names_is_a_noted_noop_in_a_multi_name_call(self) -> None:
