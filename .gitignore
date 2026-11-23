@@ -27,6 +27,7 @@ certs/*
 **/rotation/state.lock
 **/rotation/archive/
 .env.bak.*
+.env.fallbacks.pre-restore
 ..env.tmp.*
 .state.json.tmp.*
 __pycache__/
