@@ -42,6 +42,12 @@ API_DOMAIN=api.example.test
 """
 
 
+def first_check_fails():
+    """A verify that fails once (the rollout) and passes after (the verify that follows a rollback)."""
+    seen: list[int] = []
+    return lambda line: line.endswith("manage.py check") and not seen and bool(seen.append(1) or True)
+
+
 class FakeRunner:
     """Records every call; ``fail`` is a predicate on the argv string that makes a call exit 1."""
 
@@ -63,7 +69,7 @@ class FakeRunner:
         if line == "docker compose config --services":
             return SimpleNamespace(returncode=0, stdout="\n".join(SERVICES), stderr="")
         if argv[:4] == ["docker", "compose", "ps", "--format"]:
-            rows = [{"Service": s, "State": "running", "Health": "healthy"} for s in argv[5:]]
+            rows = [{"Service": s, "State": "running", "Health": "healthy"} for s in argv[5:] if s != "--all"]
             return SimpleNamespace(returncode=0, stdout=json.dumps(rows), stderr="")
         if argv[0] == "openssl":
             Path(argv[argv.index("-out") + 1]).write_text("PEM")
@@ -268,7 +274,7 @@ class StateMachineTests(Base):
         self.assertNotIn(self.env("SALT_KEY"), state)
 
     def test_verify_failure_rolls_back_automatically(self) -> None:
-        rot = self.make(fail=lambda line: line.endswith("manage.py check"), prompts=["sk_new"])
+        rot = self.make(fail=first_check_fails(), prompts=["sk_new"])
         self.assertEqual(rot.stage(["STRIPE_SECRET_KEY"]), 1)
         self.assertEqual(self.env("STRIPE_SECRET_KEY"), "sk_old")
         self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "idle")
@@ -454,7 +460,7 @@ class TwoPhaseTests(Base):
         self.assertEqual(pin2, [pin1[1], "oldsecretkey"])  # phase 2: promoted, new first
 
     def test_phase1_verify_failure_restores_old_config(self) -> None:
-        rot = self.make(fail=lambda line: line.endswith("manage.py check"))
+        rot = self.make(fail=first_check_fails())
         self.assertEqual(rot.stage(["SALT_KEY"]), 1)
         self.assertEqual(self.env("SALT_KEY"), "oldsalt+/=")
         self.assertEqual(self.env("SALT_KEY_FALLBACKS"), "")
@@ -670,7 +676,7 @@ class StageGuardTests(Base):
 
     def test_bundle_failure_rolls_both_members_back(self) -> None:
         (self.tmp / ".env").write_text(ENV + "AWS_ACCESS_KEY_ID=akid_old\nAWS_SECRET_ACCESS_KEY=aws_old\n")
-        rot = self.make(prompts=["akid_new", "aws_new"], fail=lambda l: l.endswith("manage.py check"))
+        rot = self.make(prompts=["akid_new", "aws_new"], fail=first_check_fails())
         self.assertEqual(rot.stage(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]), 1)
         self.assertEqual((self.env("AWS_ACCESS_KEY_ID"), self.env("AWS_SECRET_ACCESS_KEY")), ("akid_old", "aws_old"))
         self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
@@ -1155,7 +1161,7 @@ class ReviewRound5Tests(Base):
             pairs.append((r.get_env(text, "AWS_ACCESS_KEY_ID"), r.get_env(text, "AWS_SECRET_ACCESS_KEY")))
 
         rot = self.make(prompts=["akid_new", "aws_new"], on_roll=on_roll,
-                        fail=lambda line: line.endswith("manage.py check"))
+                        fail=first_check_fails())
         self.assertEqual(rot.stage(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]), 1)
         self.assertEqual(pairs, [("akid_new", "aws_new"), ("akid_old", "aws_old")])  # one roll per direction
         self.assertEqual(rot.step_of("AWS_ACCESS_KEY_ID"), "idle")
@@ -2000,7 +2006,7 @@ class CodeRabbitRound3Tests(Base):
         rot = self.make()
         self.assertEqual(r.main(["--dir", str(self.tmp), "verify", "alertmanager"], rotator=rot), 0)
         ps = [x for x in self.runner.argv_lines() if x.startswith("docker compose ps")]
-        self.assertEqual(ps, ["docker compose ps --format json alertmanager"])
+        self.assertEqual(ps, ["docker compose ps --format json --all alertmanager"])
 
     def test_verify_command_rejects_an_undefined_name(self) -> None:
         rot = self.make()
@@ -2310,6 +2316,118 @@ class RolloutReadinessTests(Base):
         rot = self.make(prompts=["cp_new"], files=[r.CANARY_CONFIRM_PHRASE], fail=lambda l: "ps --format" in l)
         self.assertEqual(rot.stage(["CANARY_PASSWORD"]), 1)
         self.assertFalse(rot.load_state()["secrets"]["CANARY_PASSWORD"]["unrolled"])  # recovery is by hand
+
+
+class RoundSevenTests(Base):
+    def test_a_stopped_replica_and_a_failed_ps_both_count_as_down(self) -> None:
+        rot = self.make()
+        rows = [{"Service": "web", "State": "running", "Health": "healthy"},
+                {"Service": "web", "State": "exited", "Health": ""}]
+        with mock.patch.object(rot, "compose", return_value=SimpleNamespace(returncode=0, stdout=json.dumps(rows))) as c:
+            self.assertEqual(rot._unhealthy(["web"]), ["web"])
+        self.assertIn("--all", c.call_args.args)
+        with mock.patch.object(rot, "compose", return_value=SimpleNamespace(returncode=1, stdout="[]")):
+            self.assertEqual(rot._unhealthy(["web"]), ["web"])
+        oneoff = {"Service": "web", "State": "exited", "Health": "", "Labels": "a=b,com.docker.compose.oneoff=True"}
+        with mock.patch.object(rot, "compose", return_value=SimpleNamespace(returncode=0, stdout=json.dumps([rows[0], oneoff]))):
+            self.assertEqual(rot._unhealthy(["web"]), [])  # a leftover `compose run` container is not a replica
+
+    def test_a_same_second_oidc_stage_never_reuses_an_existing_key_path(self) -> None:
+        stamp = self.clock[0].strftime("%Y%m%dT%H%M%SZ")
+        taken = self.tmp / "certs" / f"oidc-{stamp}.pem"
+        taken.write_text("ACTIVE")
+        text = (self.tmp / ".env").read_text().replace("/app/certs/oidc.pem", f"/app/certs/oidc-{stamp}.pem")
+        (self.tmp / ".env").write_text(text)
+        rot = self.make()
+        self.assertEqual(rot.stage(["OIDC_SIGNING_KEY_PATH"]), 0)
+        self.assertEqual(taken.read_text(), "ACTIVE")  # the live key was not overwritten
+        new = self.env("OIDC_SIGNING_KEY_PATH")
+        self.assertNotEqual(new, f"/app/certs/oidc-{stamp}.pem")
+        self.assertEqual(self.env("OIDC_SIGNING_KEYS_INACTIVE_PATHS"), f"/app/certs/oidc-{stamp}.pem")
+
+    def test_the_oidc_key_is_created_exclusively(self) -> None:
+        rot = self.make()
+        env = (self.tmp / ".env").read_text()
+        staged = rot.prepare(mf.MANIFEST["OIDC_SIGNING_KEY_PATH"], env)
+        Path(staged.extra["new_key_file"]).write_text("RACE")  # appears between planning and creation
+        with self.assertRaisesRegex(r.RotationError, "cannot create"):
+            staged.pre()
+        self.assertEqual(Path(staged.extra["new_key_file"]).read_text(), "RACE")
+        self.assertFalse(staged.extra.get("key_created"))  # so a failed stage never deletes it
+
+    def test_the_oidc_pem_and_its_directory_are_synced_before_env_names_it(self) -> None:
+        events: list[str] = []
+        fds: dict[int, str] = {}
+        real_open, real_fsync, real_write = os.open, os.fsync, r.write_atomic
+
+        def spy_open(path, *a, **kw):
+            fd = real_open(path, *a, **kw)
+            fds[fd] = str(path)
+            return fd
+
+        def spy_fsync(fd):
+            if fds.get(fd, "").endswith(".pem"):
+                events.append("pem-sync")
+            return real_fsync(fd)
+
+        def spy_write(path, text):
+            if Path(path) == self.tmp / ".env" and "oidc-2026" in text:
+                events.append("env-names-pem")
+            return real_write(path, text)
+
+        rot = self.make()
+        with mock.patch.object(r.os, "open", spy_open), mock.patch.object(r.os, "fsync", spy_fsync), \
+                mock.patch.object(r, "write_atomic", spy_write), \
+                mock.patch.object(r, "fsync_dir", lambda p: events.append("dir-sync") if p.name == "certs" else None):
+            self.assertEqual(rot.stage(["OIDC_SIGNING_KEY_PATH"]), 0)
+        self.assertIn("pem-sync", events)
+        self.assertIn("dir-sync", events)
+        first = events.index("env-names-pem")
+        self.assertLess(events.index("pem-sync"), first)
+        self.assertLess(events.index("dir-sync"), first)
+
+    def test_an_unchanged_wallet_password_is_still_part_of_the_new_rotation(self) -> None:
+        names = list(mf.BUNDLES["apple_wallet"])
+        rot = ReviewRound4Tests.apple_stage(self, "pw", ["pw"])
+        self.assertEqual(rot.finalize(names, archive=False), 0)
+        for n in ("c2.pem", "k2.pem"):
+            (self.tmp / "certs" / n).write_text("x")
+            os.chmod(self.tmp / "certs" / n, 0o644)
+        rot = self.make(prompts=["pw"], files=["/app/certs/c2.pem", "/app/certs/k2.pem"])
+        self.assertEqual(rot.stage(names), 0)
+        self.assertEqual(rot.step_of("APPLE_WALLET_KEY_PASSWORD"), "staged")
+        rot.rollback_unit(names)
+        self.assertEqual(self.env("APPLE_WALLET_CERT_PATH"), "/app/certs/c1.pem")
+        self.assertEqual(self.env("APPLE_WALLET_KEY_PASSWORD"), "pw")
+
+    def test_a_primary_that_interpolates_is_refused_before_any_change(self) -> None:
+        before = ENV.replace('SALT_KEY="oldsalt+/="', 'SALT_KEY="${BASE_SALT}"')
+        (self.tmp / ".env").write_text(before)
+        rot = self.make()
+        self.assertEqual(rot.stage(["SALT_KEY"]), 1)
+        self.assertIn("interpolation", "\n".join(self.out))
+        self.assertEqual((self.tmp / ".env").read_text(), before)
+        self.assertEqual(rot.step_of("SALT_KEY"), "idle")
+
+    def test_literal_dollars_are_not_interpolation(self) -> None:
+        for raw in ("'a$b'", '"a\\$b"', "a$$b", "plain"):
+            self.assertFalse(r.has_interpolation(f"K={raw}\n", "K"), raw)
+        for raw in ('"${X}"', "$X", '"a$b"'):
+            self.assertTrue(r.has_interpolation(f"K={raw}\n", "K"), raw)
+
+    def test_a_failed_verify_after_a_rollback_keeps_the_journal_and_the_key_file(self) -> None:
+        rot = self.make(fail=lambda line: line.endswith("manage.py check"))  # every verify fails, rollback's too
+        self.assertEqual(rot.stage(["OIDC_SIGNING_KEY_PATH"]), 1)
+        entry = rot.load_state()["secrets"]["OIDC_SIGNING_KEY_PATH"]
+        self.assertEqual(entry["step"], "staged")
+        self.assertTrue(entry["rollback_incomplete"])
+        self.assertTrue(Path(entry["new_key_file"]).exists())
+        self.assertTrue(list(self.tmp.glob(".env.bak.*")))
+        self.assertIn("rollback OIDC_SIGNING_KEY_PATH", "\n".join(self.out))
+        rot.runner.fail = None  # the cause is fixed: the same rollback now completes
+        rot.rollback("OIDC_SIGNING_KEY_PATH")
+        self.assertEqual(rot.step_of("OIDC_SIGNING_KEY_PATH"), "idle")
+        self.assertFalse(Path(entry["new_key_file"]).exists())
 
 
 if __name__ == "__main__":

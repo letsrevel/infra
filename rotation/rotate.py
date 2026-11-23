@@ -108,6 +108,24 @@ def get_env(text: str, name: str) -> str | None:
     return found
 
 
+def has_interpolation(text: str, name: str) -> bool:
+    """True when the effective assignment of ``name`` holds a ``$`` that Compose would expand (``${X}``).
+    A single-quoted value, ``\\$`` and ``$$`` are literal."""
+    found = None
+    for line in text.split("\n"):
+        m = _LINE.match(line)
+        if m and m.group("key") == name:
+            found = m.group("rest").lstrip()
+    if found is None or _SQ.match(found):
+        return False
+    if m := _DQ.match(found):
+        body = m.group(1)
+    else:
+        c = re.search(r"\s#", found)
+        body = found[: c.start()] if c else found
+    return "$" in re.sub(r"\\.|\$\$", "", body)
+
+
 def set_env(text: str, name: str, value: str) -> str:
     """Return ``text`` with only ``name``'s effective line changed (idempotent, order/comments kept)."""
     refuse_multiline(text)
@@ -284,6 +302,7 @@ class Staged:
     recreate: list[str] = field(default_factory=list)
     before: Callable[[], None] | None = None  # side effect run after the backup and the .env write (".env first")
     roll: bool = True
+    pre: Callable[[], None] | None = None  # a file that must exist and be synced BEFORE .env names it
 
 
 class Rotator:
@@ -446,12 +465,16 @@ class Rotator:
     def _unhealthy(self, services: list[str]) -> list[str]:
         if not services:
             return []
-        r = self.compose("ps", "--format", "json", *services)
+        # --all: a replica that exited must still count; one-off containers (compose run) are not replicas
+        r = self.compose("ps", "--format", "json", "--all", *services)
+        if r.returncode != 0:
+            return list(services)
         text = (r.stdout or "").strip()
         try:
             rows = json.loads(text) if text.startswith("[") else [json.loads(x) for x in text.splitlines() if x]
         except ValueError:
             return list(services)
+        rows = [x for x in rows if "com.docker.compose.oneoff=True" not in (x.get("Labels") or "")]
         # Every reported replica of a service must be up: one healthy row must not hide an unhealthy one.
         seen = {x.get("Service") for x in rows}
         down = {x.get("Service") for x in rows if x.get("State") != "running" or x.get("Health", "") not in ("", "healthy")}
@@ -467,11 +490,21 @@ class Rotator:
             old, fb = cur(s.name), s.fallback_var
             if not old:
                 return None
-            new = f"{os.path.dirname(old)}/oidc-{self.now().strftime('%Y%m%dT%H%M%SZ')}.pem"
+            stamp = self.now().strftime('%Y%m%dT%H%M%SZ')
+            taken = {old, *csv_split(cur(fb))}
+            new, n = f"{os.path.dirname(old)}/oidc-{stamp}.pem", 1
+            while new in taken or self.host_path(new).exists():  # same-second stage: never reuse a live or retired key path
+                n += 1
+                new = f"{os.path.dirname(old)}/oidc-{stamp}-{n}.pem"
             host_new = self.host_path(new)
             self.host_path(old)
 
             def make_key() -> None:
+                try:  # exclusive: an existing file (this key's or any other) is never overwritten
+                    os.close(os.open(host_new, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+                except OSError as e:
+                    raise RotationError(f"cannot create {host_new} ({e.strerror}): nothing was changed") from None
+                extra["key_created"] = True  # only a file this attempt created is removed on failure
                 r = self.runner.run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt",
                                      "rsa_keygen_bits:2048", "-out", str(host_new)])
                 if r.returncode != 0:
@@ -489,8 +522,9 @@ class Rotator:
                     host_new.unlink(missing_ok=True)
                     raise RotationError(f"could not sync the new key file ({e.strerror}): nothing was changed") from None
 
+            extra: dict[str, Any] = {"new_key_file": str(host_new), "retired_paths": [old]}
             return Staged({s.name: new, fb: ",".join(csv_prepend(csv_split(cur(fb)), old))}, [s.name, fb],
-                          list(s.services), {"new_key_file": str(host_new), "retired_paths": [old]}, before=make_key)
+                          list(s.services), extra, pre=make_key)
         if k == mf.LIST_APPEND:
             self.out(s.instructions)
             new = csv_split(self.prompt_secret(f"New {s.name} value(s), comma-separated (hidden, empty = skip): "))
@@ -547,8 +581,8 @@ class Rotator:
         val = self.prompt_secret(f"New {s.name} (hidden, empty = none): ").strip()
         if re.search(r"[\r\n\x00]", val):
             raise RotationError("value contains a newline")
-        if val == (get_env(env, s.name) or ""):
-            return None
+        if val == (get_env(env, s.name) or ""):  # no .env edit, but still a member of this rotation's journal
+            return Staged({}, [s.name], list(s.services))
         return Staged({s.name: val}, [s.name], list(s.services))
 
     def _prepare_db(self, s: mf.Secret, env: str) -> Staged:
@@ -750,6 +784,10 @@ class Rotator:
             old = get_env(env, name)
             if not old:
                 raise RotationError(f"{name} is unset")
+            if has_interpolation(env, name):
+                raise RotationError(f"current {name} uses $ interpolation (for example ${{VAR}}): the old key cannot "
+                                    f"be copied into {fb} as it is. Write the literal value in .env first; "
+                                    "nothing was changed")
             if "," in old:
                 raise RotationError(f"current {name} contains a comma and cannot be kept in the {fb} list")
             existing = csv_split(get_env(env, fb))
@@ -818,6 +856,9 @@ class Rotator:
             # The new value reaches .env FIRST (the backup stays); only then does a live credential change,
             # so a failed write can never leave the database/Grafana ahead of .env.
             for _, p in plans:
+                if p.pre:
+                    p.pre()
+            for _, p in plans:
                 for var, val in p.edits.items():
                     env = set_env(env, var, val)
             write_atomic(self.env_path, env)
@@ -861,7 +902,7 @@ class Rotator:
                 raise
             backup.unlink(missing_ok=True)
             for _, p in plans:
-                if "new_key_file" in p.extra:
+                if p.extra.get("key_created"):
                     Path(p.extra["new_key_file"]).unlink(missing_ok=True)
             raise
         if not roll:
@@ -964,12 +1005,16 @@ class Rotator:
             raise RotationError(
                 f"{label}: .env holds the OLD value but the services may still run the NEW one, and the state "
                 f"stays staged (or pending) with its backup. Re-run `rollback {retry}` once the rollout works") from None
+        every = sorted({x for n in names for x in MANIFEST[n].services}, key=_svc_order)
+        if not self.verify(every + sorted({x for n in names for x in entries[n].get("recreate") or []}), started):
+            for n in names:  # keep the journal, the backups and the new key file: the same rollback can be re-run
+                self.update_state(n, rollback_incomplete=True)
+            raise RotationError(f"{label}: .env holds the OLD value and the rollout finished, but verification failed. "
+                                f"The state, the backups and the new key file are kept. Fix the cause, then re-run "
+                                f"`rollback {retry}`")
         for n in names:
             if entries[n].get("new_key_file"):
                 Path(entries[n]["new_key_file"]).unlink(missing_ok=True)
-        every = sorted({x for n in names for x in MANIFEST[n].services}, key=_svc_order)
-        if not self.verify(every + sorted({x for n in names for x in entries[n].get("recreate") or []}), started):
-            self.out(f"[{label}] WARNING: verification after rollback failed: check `rotate.py verify`")
         if fallback and entry.get("phase") == 2:
             # Back to "introduced": old key primary, new key kept; its backup stays until finalize.
             self.update_state(name, step="staged", phase=1, backup=entry["b1"], vars=[s.fallback_var],
