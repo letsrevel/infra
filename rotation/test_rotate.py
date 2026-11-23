@@ -2412,7 +2412,7 @@ class RoundSevenTests(Base):
     def test_literal_dollars_are_not_interpolation(self) -> None:
         for raw in ("'a$b'", '"a\\$b"', "a$$b", "plain", "x$%y", "trail$", "abc$1", "'$HOME'"):
             self.assertFalse(r.has_interpolation(f"K={raw}\n", "K"), raw)
-        for raw in ('"${X}"', "$X", '"a$b"', "$HOME", "${VAR}", "pre${X}post"):
+        for raw in ('"${X}"', "$X", '"a$b"', "$HOME", "${VAR}", "pre${X}post", "prefix\\$BASE_SALT", '"a\\\\$B"'):
             self.assertTrue(r.has_interpolation(f"K={raw}\n", "K"), raw)
 
     def test_a_failed_verify_after_a_rollback_keeps_the_journal_and_the_key_file(self) -> None:
@@ -2431,12 +2431,23 @@ class RoundSevenTests(Base):
 
     def test_a_rollback_with_nothing_to_undo_skips_the_roll_and_the_verify(self) -> None:
         rot = self.make()
-        self.assertEqual(rot.stage(["OIDC_SIGNING_KEY_PATH"]), 0)
-        entry = rot.load_state()["secrets"]["OIDC_SIGNING_KEY_PATH"]
+        real_write, boundary = r.write_atomic, {}
+
+        def spy_write(path, text):
+            if Path(path) == self.tmp / ".env" and not boundary:  # the first .env write: capture what a kill here leaves
+                boundary.update(env=(self.tmp / ".env").read_text(), state=rot.load_state())
+                entry = boundary["state"]["secrets"]["OIDC_SIGNING_KEY_PATH"]
+                boundary["pem_exists"] = bool(entry.get("new_key_file")) and Path(entry["new_key_file"]).exists()
+            return real_write(path, text)
+
+        with mock.patch.object(r, "write_atomic", spy_write):
+            self.assertEqual(rot.stage(["OIDC_SIGNING_KEY_PATH"]), 0)
+        entry = boundary["state"]["secrets"]["OIDC_SIGNING_KEY_PATH"]
+        self.assertEqual(entry["step"], "pending")
+        self.assertTrue(boundary["pem_exists"])  # the journal already records the PEM and the file exists
         pem = Path(entry["new_key_file"])
-        self.assertTrue(pem.exists())
-        (self.tmp / ".env").write_text((self.tmp / entry["backup"]).read_text())  # killed after pre, before the .env write
-        _interrupt(rot, "OIDC_SIGNING_KEY_PATH")
+        (self.tmp / ".env").write_text(boundary["env"])
+        rot.save_state(boundary["state"])
         rot = self.make(fail=lambda line: line.endswith("manage.py check"))  # any verify would fail
         rot.rollback("OIDC_SIGNING_KEY_PATH")
         self.assertEqual(rot.step_of("OIDC_SIGNING_KEY_PATH"), "idle")
@@ -2459,8 +2470,24 @@ class RoundSevenTests(Base):
         rot = self.make()
         rows = [{"Service": "web", "Name": "revel-web-1", "State": "running", "Health": ""},
                 {"Service": "web", "Name": "revel-web-run-1a2b3c4d5e6f", "State": "exited", "Health": ""}]
-        with mock.patch.object(rot, "compose", return_value=SimpleNamespace(returncode=0, stdout=json.dumps(rows))):
+        rows = [{**rows[0], "ID": "c1"}, {**rows[1], "ID": "c2"}]
+        inspect = lambda argv, **kw: SimpleNamespace(returncode=0, stdout="True" if argv[-1] == "c2" else "")
+        with mock.patch.object(rot, "compose", return_value=SimpleNamespace(returncode=0, stdout=json.dumps(rows))), \
+             mock.patch.object(rot.runner, "run", side_effect=inspect):
             self.assertEqual(rot._unhealthy(["web"]), [])
+
+    def test_the_oneoff_label_decides_not_the_container_name(self) -> None:
+        rot = self.make()
+        labelled = {"Service": "web", "Name": "web-run-deadbeef", "State": "running", "Health": "", "Labels": "a=b"}
+        named = {"Service": "web", "ID": "c1", "Name": "migration-check", "State": "exited", "Health": ""}
+
+        def ps(rows, label):
+            with mock.patch.object(rot, "compose", return_value=SimpleNamespace(returncode=0, stdout=json.dumps(rows))), \
+                 mock.patch.object(rot.runner, "run", return_value=SimpleNamespace(returncode=0, stdout=label)) as run:
+                return rot._unhealthy(["web"]), run.call_count
+        self.assertEqual(ps([labelled], ""), ([], 0))  # label present, not one-off: the `-run-` name is a real replica
+        self.assertEqual(ps([labelled, named], "True\n"), ([], 1))  # no Labels: inspected by ID, one-off dropped
+        self.assertEqual(ps([labelled, named], ""), (["web"], 1))  # inspected as a replica: stopped counts as down
 
 
 def _interrupt(rot: r.Rotator, name: str) -> None:

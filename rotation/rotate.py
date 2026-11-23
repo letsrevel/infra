@@ -123,7 +123,9 @@ def has_interpolation(text: str, name: str) -> bool:
     else:
         c = re.search(r"\s#", found)
         body = found[: c.start()] if c else found
-    return re.search(r"\$[{A-Za-z_]", re.sub(r"\\.|\$\$", "", body)) is not None
+    # Compose reads `\$` as an escape only in double quotes; unquoted, the backslash stays and `$X` expands
+    strip = r"\\.|\$\$" if _DQ.match(found) else r"\$\$"
+    return re.search(r"\$[{A-Za-z_]", re.sub(strip, "", body)) is not None
 
 
 def set_env(text: str, name: str, value: str) -> str:
@@ -462,6 +464,18 @@ class Rotator:
             self.out(f"  [{'PASS' if ok else 'FAIL'}] {name}: {detail}")
         return all(ok for _, ok, _ in results)
 
+    def _is_one_off(self, row: dict[str, Any]) -> bool:
+        """The exact oneoff label decides. Older Compose omits Labels from `ps`: then read it from the container
+        (a name never proves it; an unreadable label counts the row as a replica)."""
+        labels = row.get("Labels")
+        if labels is not None:
+            return "com.docker.compose.oneoff=True" in labels
+        ref = row.get("ID") or row.get("Name")
+        if not ref:
+            return False
+        r = self.runner.run(["docker", "inspect", "--format", '{{index .Config.Labels "com.docker.compose.oneoff"}}', ref])
+        return r.returncode == 0 and (r.stdout or "").strip() == "True"
+
     def _unhealthy(self, services: list[str]) -> list[str]:
         if not services:
             return []
@@ -474,9 +488,7 @@ class Rotator:
             rows = json.loads(text) if text.startswith("[") else [json.loads(x) for x in text.splitlines() if x]
         except ValueError:
             return list(services)
-        # older JSON-array output has no Labels: also drop `compose run` names (<project>-<service>-run-<id>)
-        rows = [x for x in rows if "com.docker.compose.oneoff=True" not in (x.get("Labels") or "")
-                and not re.search(r"-run-[0-9a-f]+$", x.get("Name") or "")]
+        rows = [x for x in rows if not self._is_one_off(x)]
         # Every reported replica of a service must be up: one healthy row must not hide an unhealthy one.
         seen = {x.get("Service") for x in rows}
         down = {x.get("Service") for x in rows if x.get("State") != "running" or x.get("Health", "") not in ("", "healthy")}

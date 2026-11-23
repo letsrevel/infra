@@ -250,7 +250,7 @@ retired values are in `rotation/archive/*.age`.
    copy is mode 0600, and you delete it after step 6). Create it only once. If it exists, an earlier run of this
    step already saved the original lines and may have added keys since: keep the file, do not overwrite it, and
    carry on with the next instruction:
-   `if [ -e .env.fallbacks.pre-restore ]; then echo "keeping the snapshot from an earlier run"; else ( umask 077; grep -E '^(SECRET_KEY|SALT_KEY)_FALLBACKS=' .env > .env.fallbacks.pre-restore ); fi`.
+   `if [ -e .env.fallbacks.pre-restore ]; then echo "keeping the snapshot from an earlier run"; else ( umask 077; grep -E '^(SECRET_KEY|SALT_KEY)_FALLBACKS=' .env > .env.fallbacks.tmp; [ $? -le 1 ] && mv .env.fallbacks.tmp .env.fallbacks.pre-restore ); fi`.
    Then copy the retired keys into the `*_FALLBACKS` variables of `.env`. Pass **every** archive in
    `rotation/archive/*.age`. That is the safe default: a retired value the dump does not need is harmless as a
    fallback, and step 6 takes out the ones this step added. Do not filter by the date in a file name or by file mtime: names are
