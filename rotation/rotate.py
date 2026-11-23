@@ -676,8 +676,7 @@ class Rotator:
             except RotationError as e:
                 self.out(f"ERROR: {e}")
             if ok:
-                for n in pending:  # now the services run the staged values: finalize may proceed
-                    self.update_state(n, unrolled=False)
+                self._mark_rolled(pending)
             else:
                 failures += 1
                 units: dict[str, list[str]] = {}
@@ -692,6 +691,14 @@ class Rotator:
                                  f"`rollback {retry_name(unit[0])}`")
                         failures += 1
         return failures
+
+    def _mark_rolled(self, names: list[str]) -> None:
+        """The services run the staged values and passed verify: migrate and finalize may proceed. One state
+        write, so a stop in between cannot leave part of a bundle marked."""
+        state = self.load_state()
+        for n in names:
+            state["secrets"][n].update(unrolled=False, updated_at=self.now().isoformat())
+        self.save_state(state)
 
     def _stage_group(self, secs: list[mf.Secret], roll: bool) -> list[str]:
         """Stage one secret or one bundle with a single backup and a single roll."""
@@ -788,7 +795,7 @@ class Rotator:
                 step="pending", kind=s.kind, staged_at=now.isoformat(), backup=backup.name,
                 backups=old.get("backups", []) + [backup.name], vars=p.touched, recreate=p.recreate, roll=p.roll,
                 grace_end=(now + s.grace).isoformat() if s.grace and p.extra.get("phase", 2) == 2 else None,
-                updated_at=now.isoformat(), unrolled=not roll, **extra)
+                updated_at=now.isoformat(), unrolled=True, **extra)  # cleared once the rollout is verified
             state["secrets"][s.name] = entry
         live_done = live_running = False
         try:
@@ -852,6 +859,8 @@ class Rotator:
             ok = self.verify(sorted({x for _, p in plans for x in p.services}, key=_svc_order) + recreate, now)
         except RotationError as e:
             self.out(f"ERROR: {e}")
+        if ok or any(not s.reversible for s, _ in plans):  # a forward-only value is never rolled back: nothing to wait for
+            self._mark_rolled([s.name for s, _ in plans])
         if not ok and any(not s.reversible for s, _ in plans):
             names = ", ".join(s.name for s, _ in plans if not s.reversible)
             svcs = " ".join(services)
@@ -949,7 +958,7 @@ class Rotator:
         if fallback and entry.get("phase") == 2:
             # Back to "introduced": old key primary, new key kept; its backup stays until finalize.
             self.update_state(name, step="staged", phase=1, backup=entry["b1"], vars=[s.fallback_var],
-                              grace_end=None, rollback_incomplete=False)
+                              grace_end=None, rollback_incomplete=False, unrolled=False)
             self.out(f"[{name}] rolled back to phase 1 ({reason}); the new key stays in {s.fallback_var}")
             return
         for n in names:
@@ -992,6 +1001,11 @@ class Rotator:
                   if e.get("step") == "staged" and MANIFEST[n].migrate}
         if not staged:
             raise RotationError("nothing staged that needs a migrate")
+        unrolled = [n for n, e in staged.items() if e.get("unrolled")]
+        if unrolled:
+            raise RotationError(f"{', '.join(unrolled)}: the rollout and verify of the staged value did not finish, so "
+                                f"the services may still use the old key: run `rollback {retry_name(unrolled[0])}`, "
+                                "then stage again")
         stuck = [n for n, e in staged.items() if e.get("rollback_incomplete")]
         if stuck:
             raise RotationError(f"{', '.join(stuck)}: the last rollback did not finish and the services may still use "
@@ -1090,7 +1104,7 @@ class Rotator:
         step = entry.get("step", "idle")
         next_step(step, "finalize")
         if entry.get("unrolled"):
-            raise RotationError(f"{name} was staged by a --batch whose rollout and verify did not finish: run "
+            raise RotationError(f"{name} was staged but its rollout and verify did not finish: run "
                                 f"`rollback {retry_name(name)}`, then stage it again (not overridable)")
         if entry.get("rollback_incomplete"):
             raise RotationError(f"the last rollback of {name} did not finish, so the services may still use the "

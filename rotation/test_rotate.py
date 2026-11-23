@@ -1992,7 +1992,7 @@ class CodeRabbitRound3Tests(Base):
         rot = self.make()
         self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "staged")
         self.assertEqual(rot.finalize(["STRIPE_SECRET_KEY"], force=True, archive=False), 1)
-        self.assertIn("[STRIPE_SECRET_KEY] ERROR: STRIPE_SECRET_KEY was staged by a --batch whose rollout and verify "
+        self.assertIn("[STRIPE_SECRET_KEY] ERROR: STRIPE_SECRET_KEY was staged but its rollout and verify "
                       "did not finish", "\n".join(self.out))
         self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "staged")
         self.assertTrue(list(self.tmp.glob(".env.bak.*")))  # rollback stays possible
@@ -2202,6 +2202,70 @@ class CodeRabbitRound5Tests(Base):
         self.assertEqual(rot.stage(["DB_PASSWORD"]), 1)
         self.assertIn("not ASCII", "\n".join(self.out))
         self.assertFalse([c for c in self.runner.calls if "psql" in c.argv])
+
+
+class RolloutReadinessTests(Base):
+    def kill_on_roll(self, nth: int):
+        count = [0]
+
+        def on_roll(_line: str) -> None:
+            count[0] += 1
+            if count[0] == nth:
+                raise KeyboardInterrupt
+
+        return on_roll
+
+    def test_a_stage_stopped_before_its_roll_cannot_be_finalized_until_rolled_back(self) -> None:
+        rot = self.make(prompts=["sk_new"], on_roll=self.kill_on_roll(1))
+        with self.assertRaises(KeyboardInterrupt):  # saved as staged, killed before the services ran it
+            rot.stage(["STRIPE_SECRET_KEY"])
+        rot = self.make()
+        self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "staged")
+        self.assertEqual(rot.finalize(["STRIPE_SECRET_KEY"], force=True, archive=False), 1)
+        self.assertIn("rollout and verify did not finish", "\n".join(self.out))
+        rot.rollback("STRIPE_SECRET_KEY")
+        self.assertEqual(self.env("STRIPE_SECRET_KEY"), "sk_old")
+
+    def test_a_promotion_stopped_before_its_roll_cannot_be_migrated(self) -> None:
+        rot = self.make(on_roll=self.kill_on_roll(2))  # roll 1 = phase 1, roll 2 = the promotion
+        with self.assertRaises(KeyboardInterrupt):
+            rot.stage(["SALT_KEY"])
+        rot = self.make()
+        entry = rot.load_state()["secrets"]["SALT_KEY"]
+        self.assertEqual((entry["step"], entry["phase"], entry["unrolled"]), ("staged", 2, True))
+        with self.assertRaisesRegex(r.RotationError, "did not finish"):
+            rot.migrate()
+        self.assertFalse([c for c in self.runner.calls if "rotate_encrypted_fields" in " ".join(c.argv)
+                          and "help" not in c.argv])
+
+    def test_a_completed_stage_is_ready_for_migrate_and_finalize(self) -> None:
+        rot = self.make(prompts=["sk_new"])
+        self.assertEqual(rot.stage(["SALT_KEY", "STRIPE_SECRET_KEY"]), 0)
+        self.assertFalse(any(e["unrolled"] for e in rot.load_state()["secrets"].values()))
+        rot.migrate()
+
+    def test_a_bundle_is_marked_rolled_in_one_state_write(self) -> None:
+        (self.tmp / ".env").write_text(ENV + "AWS_ACCESS_KEY_ID=akid_old\nAWS_SECRET_ACCESS_KEY=aws_old\n")
+        rot = self.make(prompts=["akid_new", "aws_new"])
+        seen: list[tuple[bool, bool]] = []
+        real = rot.save_state
+
+        def spy(state):
+            real(state)
+            e = state["secrets"]
+            if "AWS_ACCESS_KEY_ID" in e and "AWS_SECRET_ACCESS_KEY" in e:
+                seen.append((e["AWS_ACCESS_KEY_ID"].get("unrolled"), e["AWS_SECRET_ACCESS_KEY"].get("unrolled")))
+
+        rot.save_state = spy
+        self.assertEqual(rot.stage(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"], batch=True), 0)
+        self.assertIn((False, False), seen)
+        self.assertTrue(all(a == b for a, b in seen), seen)  # never one member marked and the other not
+
+    def test_a_forward_only_secret_with_a_failed_verify_is_not_left_unrolled(self) -> None:
+        (self.tmp / ".env").write_text(ENV + "CANARY_PASSWORD=cp_old\n")
+        rot = self.make(prompts=["cp_new"], files=[r.CANARY_CONFIRM_PHRASE], fail=lambda l: "ps --format" in l)
+        self.assertEqual(rot.stage(["CANARY_PASSWORD"]), 1)
+        self.assertFalse(rot.load_state()["secrets"]["CANARY_PASSWORD"]["unrolled"])  # recovery is by hand
 
 
 if __name__ == "__main__":
