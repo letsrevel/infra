@@ -2253,6 +2253,26 @@ class CodeRabbitRound5Tests(Base):
         self.assertIn("not ASCII", "\n".join(self.out))
         self.assertFalse([c for c in self.runner.calls if "psql" in c.argv])
 
+    def test_an_interpolated_current_db_password_is_refused_before_any_prompt(self) -> None:
+        before = ENV.replace("DB_PASSWORD=olddbpass", 'DB_PASSWORD="${BASE_DB}"')
+        (self.tmp / ".env").write_text(before)
+        rot = self.make(maintenance=True)  # no prompts: the confirmation prompt would raise StopIteration
+        self.assertEqual(rot.stage(["DB_PASSWORD"]), 1)
+        self.assertIn("interpolation", "\n".join(self.out))
+        self.assertEqual((self.tmp / ".env").read_text(), before)
+        self.assertFalse([c for c in self.runner.calls if "psql" in c.argv])
+        self.assertEqual(rot.step_of("DB_PASSWORD"), "idle")
+
+    def test_an_interpolated_current_grafana_password_is_refused_before_any_reset(self) -> None:
+        before = ENV.replace("GRAFANA_ADMIN_PASSWORD=oldgraf", "GRAFANA_ADMIN_PASSWORD=${BASE_GRAF}")
+        (self.tmp / ".env").write_text(before)
+        rot = self.make()
+        self.assertEqual(rot.stage(["GRAFANA_ADMIN_PASSWORD"]), 1)
+        self.assertIn("interpolation", "\n".join(self.out))
+        self.assertEqual((self.tmp / ".env").read_text(), before)
+        self.assertFalse([c for c in self.runner.calls if "reset-admin-password" in c.argv])
+        self.assertEqual(rot.step_of("GRAFANA_ADMIN_PASSWORD"), "idle")
+
 
 class RolloutReadinessTests(Base):
     def kill_on_roll(self, nth: int):

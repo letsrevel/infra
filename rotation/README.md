@@ -203,7 +203,8 @@ so the grace windows overlap.
 
 Rotate `GRAFANA_ADMIN_PASSWORD` any time: `rotate.py stage GRAFANA_ADMIN_PASSWORD` resets it with
 `grafana cli admin reset-admin-password --password-from-stdin` (the env var only applies at first
-init) and updates `.env`. Nothing is restarted.
+init) and updates `.env`. Nothing is restarted. `stage` refuses a current `GRAFANA_ADMIN_PASSWORD` or
+`DB_PASSWORD` that uses `$` interpolation (rollback could not restore the live credential): write the literal value first.
 
 ## DB password (maintenance window)
 

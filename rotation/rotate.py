@@ -608,6 +608,11 @@ class Rotator:
             if stat.S_IMODE(host.stat().st_mode) != 0o644:
                 raise RotationError(f"{host} must be chmod 644 (containers run as uid 997)")
             return Staged({s.name: path}, [s.name], list(s.services))
+        if k in (mf.DB_PASSWORD, mf.GRAFANA_ADMIN) and has_interpolation(env, s.name):
+            # rollback writes the raw line back and Compose expands it, but the live reset takes the literal value
+            raise RotationError(f"current {s.name} uses $ interpolation (for example ${{VAR}}): a failed rotation "
+                                "could not restore the live credential. Write the literal value in .env first "
+                                "(single-quote the value or write $$ if it is literal); nothing was changed")
         if k == mf.DB_PASSWORD:
             return self._prepare_db(s, env)
         if k == mf.GRAFANA_ADMIN:
