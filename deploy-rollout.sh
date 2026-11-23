@@ -30,6 +30,25 @@ install_rollout() {
     fi
 }
 
+# component_behind <image_ref> <service...>
+# Succeeds when any container (running or stopped) of these services runs an image ID
+# that differs from the local tag's image. Used so a `deploy` that was cut short, or a
+# `pull` done by hand, is still finished by the next `deploy`.
+component_behind() {
+    local ref=$1 cid ids want svc
+    shift
+    want=$(image_id "$ref")
+    [ -n "$want" ] || return 1
+    for svc in "$@"; do
+        # A failed `ps` must stop the deploy: an empty list would read as "not behind".
+        ids=$(docker compose ps -a -q "$svc") || { echo -e "${RED}docker compose ps failed for $svc${NC}" >&2; exit 1; }
+        for cid in $ids; do
+            [ "$(docker inspect --format '{{.Image}}' "$cid")" != "$want" ] && return 0
+        done
+    done
+    return 1
+}
+
 # One-time migration (causes brief downtime)
 # Run this ONCE after updating config files
 migrate() {
@@ -78,6 +97,10 @@ deploy() {
     local backend_changed=0 frontend_changed=0
     [ "$old_backend" != "$new_backend" ] && backend_changed=1
     [ "$old_frontend" != "$new_frontend" ] && frontend_changed=1
+    # A container that still runs an older image than the local tag is also rolled
+    # (an earlier deploy or a manual pull moved the tag but did not finish).
+    component_behind "$IMAGE_BACKEND" web celery_default beat telegram && backend_changed=1
+    component_behind "$IMAGE_FRONTEND" frontend && frontend_changed=1
 
     if [ "$backend_changed" -eq 0 ] && [ "$frontend_changed" -eq 0 ]; then
         echo -e "${GREEN}No new images — nothing to deploy.${NC}"
@@ -94,10 +117,10 @@ deploy() {
         docker rollout -t 120 celery_default
 
         echo -e "${YELLOW}Restarting beat (cannot run two instances)...${NC}"
-        docker compose up -d --force-recreate beat
+        docker compose up -d --no-deps --force-recreate beat
 
         echo -e "${YELLOW}Restarting telegram (cannot run two instances)...${NC}"
-        docker compose up -d --force-recreate telegram
+        docker compose up -d --no-deps --force-recreate telegram
     else
         echo -e "${GREEN}Backend image unchanged — skipping web/celery_default/beat/telegram.${NC}"
     fi
@@ -123,14 +146,98 @@ deploy() {
     fi
 }
 
+# Roll services onto the current .env / compose config WITHOUT pulling images or
+# migrating, so an env-only change (e.g. a secret rotation) never ships new code.
+# Same per-service sequence as `deploy`. With no arguments it rolls the app services;
+# services outside the active compose profiles are skipped. Refuses a service whose running container uses an
+# older image than the local tag. Never `up -d` the whole stack.
+roll() {
+    local order=(web celery_default beat telegram frontend) requested=("$@") svcs=() svc active
+    [ "${#requested[@]}" -eq 0 ] && requested=("${order[@]}")
+
+    # Known app services first, in deploy order, then anything else as given.
+    for svc in "${order[@]}"; do
+        case " ${requested[*]} " in *" $svc "*) svcs+=("$svc") ;; esac
+    done
+    for svc in "${requested[@]}"; do
+        case " ${order[*]} " in *" $svc "*) ;; *) svcs+=("$svc") ;; esac
+    done
+
+    # A name that is not defined at all is a typo: fail before rolling anything.
+    # One that is defined but sits in an inactive profile is skipped with a note.
+    local defined bad=0
+    defined=$(docker compose --profile '*' config --services)
+    for svc in "${svcs[@]}"; do
+        if ! grep -Fqx -- "$svc" <<<"$defined"; then
+            echo -e "${RED}Unknown service: $svc (not defined in docker-compose.yml).${NC}" >&2
+            bad=1
+        fi
+    done
+    [ "$bad" -eq 0 ] || return 1
+
+    active=$(docker compose config --services)
+
+    # A local tag that moved since the containers were created (a `deploy` that pulled and then stopped before
+    # its migrate/roll) would ship new code without its migrations: refuse and let `deploy` finish first.
+    local cid cids running ref stale=0
+    for svc in "${svcs[@]}"; do
+        grep -Fqx -- "$svc" <<<"$active" || continue
+        cids=$(docker compose ps -a -q "$svc") || { echo -e "${RED}docker compose ps failed for $svc${NC}" >&2; return 1; }
+        # docker-rollout replaces the stopped replica of a mixed set and leaves the running one on its old
+        # environment, so a rotation would look rolled while a replica still holds the old values.
+        case "$svc" in
+            web | celery_default | frontend)
+                running=$(docker compose ps -q "$svc") || { echo -e "${RED}docker compose ps failed for $svc${NC}" >&2; return 1; }
+                if [ -n "$running" ] && [ "$(wc -w <<<"$running")" -ne "$(wc -w <<<"$cids")" ]; then
+                    echo -e "${RED}$svc has running and stopped replicas: roll would leave a running replica on the old .env. Remove the stopped container ('docker compose ps -a', then 'docker rm <id>') and re-run roll.${NC}" >&2
+                    stale=1
+                fi
+                ;;
+        esac
+        for cid in $cids; do
+            ref=$(docker inspect --format '{{.Config.Image}}' "$cid") || {
+                echo -e "${RED}$svc: container changed during the check; re-run roll.${NC}" >&2
+                return 1
+            }
+            # Only the images with migrations (backend, frontend) are checked; canary,
+            # alertmanager, grafana and the like are never managed by `deploy`.
+            case "$ref" in "$IMAGE_BACKEND" | "$IMAGE_FRONTEND") ;; *) continue ;; esac
+            if [ -n "$(image_id "$ref")" ] && [ "$(docker inspect --format '{{.Image}}' "$cid")" != "$(image_id "$ref")" ]; then
+                echo -e "${RED}$svc runs an older image than the local $ref: run '$0 deploy' (it applies the migrations through the web rollout and rolls the rest; roll never changes images).${NC}" >&2
+                stale=1
+            fi
+        done
+    done
+    [ "$stale" -eq 0 ] || return 1
+
+    for svc in "${svcs[@]}"; do
+        if ! grep -Fqx -- "$svc" <<<"$active"; then
+            echo -e "${YELLOW}Skipping $svc (defined, but not in the active compose profiles).${NC}"
+            continue
+        fi
+        case "$svc" in
+            web | celery_default | frontend)
+                echo -e "${YELLOW}Rolling out $svc...${NC}"
+                docker rollout -t 120 "$svc"
+                ;;
+            *)
+                echo -e "${YELLOW}Recreating $svc...${NC}"
+                docker compose up -d --no-deps --force-recreate "$svc"
+                ;;
+        esac
+    done
+    echo -e "${GREEN}Roll complete!${NC}"
+}
+
 # Show usage
 usage() {
-    echo "Usage: $0 {install|migrate|deploy}"
+    echo "Usage: $0 {install|migrate|deploy|roll [service...]}"
     echo ""
     echo "Commands:"
     echo "  install  - Install docker-rollout plugin"
     echo "  migrate  - One-time migration (causes downtime, run once after config update)"
     echo "  deploy   - Zero-downtime deployment (use for all future deploys)"
+    echo "  roll     - Roll services onto the current .env, no pull, no migrate (secret rotation)"
     echo ""
     echo "First time setup:"
     echo "  1. $0 install"
@@ -150,6 +257,10 @@ case "${1:-}" in
         ;;
     deploy)
         deploy
+        ;;
+    roll)
+        shift
+        roll "$@"
         ;;
     *)
         usage

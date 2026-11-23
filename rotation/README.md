@@ -1,0 +1,330 @@
+# Secret rotation
+
+Routine rotation of every secret in a Revel Compose deployment, with overlap windows so web
+stays up. Python 3 standard library only. The catalogue of secrets is `manifest.py`; the CLI is
+`rotate.py`. Values are never printed, logged, put in argv or written to `state.json`.
+
+Run it on the host, from the deploy dir:
+
+```bash
+ssh -t revel 'cd infra && ./rotation/rotate.py status'
+```
+
+`-t` is needed: the tool prompts (hidden input) for third-party values and confirmations.
+
+`stage`, `migrate`, `finalize` and `rollback` hold an exclusive lock on `rotation/state.lock` for the whole command (prompts
+included). A second one fails at once with `another rotate.py command ... is running`. `plan`, `status`, `check` and `verify` do not lock.
+
+## Prerequisites
+
+- `python3` >= 3.10 on the host (no third-party packages).
+- The `docker rollout` plugin (`./deploy-rollout.sh install`).
+- `age` and a recipient public key in `ROTATION_AGE_RECIPIENT` (`.env` or the environment), to
+  archive retired secrets. Without them `finalize` refuses unless you pass `--no-archive`.
+- A backend release that ships key fallbacks (`SECRET_KEY_FALLBACKS`, `SALT_KEY_FALLBACKS`,
+  `UNSUBSCRIBE_SIGNING_KEYS`, `rotate_encrypted_fields`; backend #1283). `stage` of `SECRET_KEY` or
+  `SALT_KEY` checks that `manage.py help rotate_encrypted_fields` works in the running `web`.
+- A deploy dir with `docker-compose.yml`, `.env` and `deploy-rollout.sh`. Prod: `~/infra`
+  (the tool defaults to the parent of `rotation/`). Demo: `~/infra/revel`, run
+  `./rotation/rotate.py --dir revel ...`; that dir needs `deploy-rollout.sh`, `notify-discord.sh`
+  and `image-diff.sh` next to its compose file (symlinks are fine). State and archives live in
+  `<dir>/rotation/`.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `plan` | Per secret: kind, set/unset, step, grace end, services that get rolled. |
+| `status` | Same without the services column. A secret whose `finalize` was interrupted shows `(finalize interrupted: run finalize)`. Then a `WARNING` for each `.env.bak.*` that no `pending`, `staged` or `migrated` entry in `state.json` references (see the journal section below). |
+| `check [--example PATH]` | Drift check. Fails (exit 1) on any key matching `SECRET\|TOKEN\|KEY\|PASSWORD\|WEBHOOK_URL` in `.env.example` (commented ones included) or the live `.env` that is not in the manifest. Lists manifest secrets that are not set in `.env`. Runs in CI against `.env.example`. |
+| `stage <name...>` / `stage --group self\|thirdparty\|all` | Back up `.env` (`.env.bak.<ts>`, 0600), edit only the target lines, record the step, roll the affected services, `verify`. A failed verify restores that secret and rolls again; if that rollback itself cannot complete (the live credential is not restorable, or the recovery roll fails), the secret stays `staged` and the command exits non-zero (see the rollback rules below). `--batch` rolls and verifies once for the whole invocation (on failure it rolls each secret back, one by one: a secret whose rollback fails is reported, stays `staged` and must be rolled back again with `rollback <name>` (`rollback <bundle>` for a bundle member), and the exit code is non-zero; if the batch is interrupted (Ctrl-C, a failed state write), it prints the secrets it staged but did not roll and verify, and the `rollback` command for them); it does not apply to `SECRET_KEY` / `SALT_KEY`, which always roll twice and refuse a current value that uses `$` interpolation (for example `"${BASE_SALT}"`; write the literal value first). Unset secrets are skipped, except `STRIPE_WEBHOOK_SECRETS` (a list), which is staged even when unset: when the list is empty it is seeded from the legacy `STRIPE_WEBHOOK_SECRET`, so no endpoint loses its secret before the grace period. Pressing Enter at a hidden prompt skips that secret (`skipped <NAME>`, not an error; for a bundle, the whole bundle). Two exceptions: after a forward-only confirmation phrase (`TELEGRAM_BOT_TOKEN`, `PUSHOVER_USER_KEY`, `CANARY_PASSWORD`) a blank value is an error, because the old value is already revoked; for the optional Apple Wallet password, Enter means "no password". Paired credentials are bundles (below). `DB_PASSWORD` is refused in `--batch` and next to any other secret. The legacy `STRIPE_WEBHOOK_SECRET` is refused (roll `STRIPE_WEBHOOK_SECRETS`). |
+| `migrate` | `rotate_encrypted_fields`, then `rotate_encrypted_fields --verify`, for staged `SECRET_KEY` / `SALT_KEY`. |
+| `verify [service...]` | Health, API, frontend, `manage.py check`, error-line budget (below). Checks the app services; name services to check those instead (for example `alertmanager`). A name that is not in `docker compose --profile '*' config --services` is an error. A name in an inactive profile is skipped with a note. The command exits non-zero when a named list leaves nothing to check. The frontend probe times out after 10 s. |
+| `finalize <name...> [--force] [--no-archive]` | After the grace window. Order: trial-encrypt to the recipient, **archive the retired values with `age`**, then record a copy of `.env` in the state (the finalize journal), edit `.env`, roll, verify, then delete the run's `.env.bak.*` (and, for OIDC, the retired PEM, only if it was archived and sits inside `certs/`). An archive failure leaves `.env`, the state and the backups untouched. If verify fails after the edit, the old values are restored, the plaintext copy is deleted and the roll is repeated; if that roll fails too the tool says the services are out of sync and prints the command to re-roll. If `.env` itself cannot be restored, the copy and the journal are kept and the error names the copy: do not delete it; fix the cause and run `finalize <name>` again, which resumes from it. A `finalize` that was killed (including by Ctrl-C while `.env` was being written) is also resumed by running it again (see the journal section below). `finalize` and `migrate` refuse, with or without `--force`, a secret whose staged value was not yet rolled and verified (a `stage` or `--batch` that was stopped before or during its rollout; run `rollback`, then stage again), and a secret whose last `rollback` could not re-roll the services (re-run `rollback` first). |
+| `rollback <name...>` | Restore the secret's previous values from its backup (while `staged` or `pending`). See the rollback rule below; `TELEGRAM_BOT_TOKEN`, `PUSHOVER_USER_KEY` and `CANARY_PASSWORD` are forward-only: `rollback` refuses them while `staged`, and for a `pending` entry it only resolves the journal (it never restores the revoked token; see the Telegram section). A bundle is rolled back as a whole: name the bundle (`rollback aws`) or every member. Members already rolled back are skipped, so the same command retries a bundle that got stuck halfway. |
+
+Groups: `self` = `SECRET_KEY`, `SALT_KEY`, OIDC key, Grafana password. `thirdparty` = everything
+rolled in a provider console, plus `STRIPE_WEBHOOK_SECRETS`, except `TELEGRAM_BOT_TOKEN`, `PUSHOVER_USER_KEY` and `CANARY_PASSWORD`. `DB_PASSWORD`,
+`TELEGRAM_BOT_TOKEN`, `PUSHOVER_USER_KEY` and `CANARY_PASSWORD` are in no group: they are staged by name only. The legacy `STRIPE_WEBHOOK_SECRET` is in no group
+either and `stage` refuses it (`plan` shows `via STRIPE_WEBHOOK_SECRETS`): roll `STRIPE_WEBHOOK_SECRETS`, which is seeded
+from it (only when the list is empty) and keeps it valid for the grace period. `finalize` drops the old list items but leaves
+the legacy `STRIPE_WEBHOOK_SECRET` line in `.env`: it is simply unused while the list is set, and you may remove it by hand.
+
+### Two-phase stage for `SECRET_KEY` / `SALT_KEY`
+
+During a rollout old containers (which only know the old key) run next to new ones. The
+encrypted-fields library swallows `InvalidToken` and returns the ciphertext as the value, so an
+old container saving a row that a new one wrote under the new key would corrupt it for good.
+`stage` therefore rolls twice:
+
+1. **Introduce**: the new key is appended to `*_FALLBACKS`, the old key stays primary (for
+   `SECRET_KEY` the unsubscribe pin is introduced here, too). Roll, verify. Every container can now read the new key; nothing is written with it.
+2. **Promote**: the new key becomes primary and the old key goes FIRST in `*_FALLBACKS`, the rest of the list kept. Roll, verify.
+
+Both phases are recorded in `state.json` (`phase`, shown in `status`). If a run stops after phase 1,
+running `stage` again resumes with the promotion and reuses the introduced key. `migrate` and
+`finalize` require phase 2 to be complete.
+
+**Rollback rule: a key that has ever been introduced as primary is never removed.** Rolling back
+phase 1 (nothing was ever written with the new key) restores the old config. Rolling back phase 2,
+manually or after a failed verify, makes the old key primary again and KEEPS the new key in
+`*_FALLBACKS`; its `.env.bak.*` is kept until `finalize`. After that, `rollback` is refused: re-run
+`stage` to promote again.
+
+If the live credential (`DB_PASSWORD`, `GRAFANA_ADMIN_PASSWORD`) cannot be restored, `rollback`
+aborts before touching `.env` or rolling anything: the credential is still the new one, `.env` and the
+state still match it, and you re-run `rollback` once the service is back.
+
+If the recovery roll fails after `.env` was restored, `rollback` raises as well: `.env` holds the old value,
+but the services may still run the new one. The secret stays `staged` (or `pending`, if the rollback started from there) and no backup is deleted (nor the new
+OIDC key file), so re-run `rollback <name>` once the rollout works. Every step is idempotent (credential reset
+to the old value, `.env` rewritten from the same backup, roll). A bundle is rolled back member by member and a
+failing member does not stop the others; re-run `rollback <bundle>` (e.g. `rollback aws`): members already rolled back (`idle`) are skipped with `already rolled back, skipping`, and the stuck ones are retried. Naming only some members is refused, as for `stage`.
+If the recovery roll works but the verify that follows it fails, `rollback` also raises and changes nothing more: the
+state, the backups and the new key file stay, so re-run `rollback <name>` once the cause is fixed.
+
+### Interrupted commands (write-ahead journal)
+
+Before `stage` touches `.env` or a live credential (`ALTER ROLE`, Grafana reset) it records the secret as
+`pending` in `state.json` (backup name and touched variables included), and flips it to `staged` once the
+change is done. A hard kill in between (SIGKILL, power loss, ssh drop) therefore leaves the secret `pending`
+with its `.env.bak.*` kept; `status` shows `pending (interrupted: run rollback)`. Any failure before a live
+credential could have changed (a failed `.env` write, a clean non-zero exit of the credential command) is undone on
+the spot: `.env` and the state are restored and the backup deleted. The cases where a live credential may have
+changed (Ctrl-C while `psql` runs, a failed state write after `ALTER ROLE`) keep `.env` new and the entry `pending`.
+If `.env` itself cannot be restored, or the state cannot be restored after it, the entry stays `pending` with its
+backup: run `rollback`. Until it is cleared,
+`stage`, `migrate` and `finalize` refuse to run; `verify` and `check` still work. Run `rollback <name>`
+(`rollback <bundle>` for a bundle member): it restores the old values from the backup and is safe whether or
+not the `.env` write or the credential change happened. A phase-2 `SECRET_KEY` / `SALT_KEY` promotion goes
+back to phase 1 with the new key kept in the fallbacks, as for any rollback of phase 2. `ever_primary` stays set
+after that (conservative: if `.env` was written and something rolled the services, the new key may have been
+primary), so the secret returns to phase 1 and the rotation can only be promoted again, not dropped. Nothing is lost.
+
+`stage` writes the `.env.bak.*` first and records it in the journal immediately after. A hard kill between the two
+leaves a backup that no entry references. `status` shows a `WARNING` for every `.env.bak.*` that no `pending`, `staged`
+or `migrated` entry references (also from a `finalize` killed just before it records its copy or just after it clears
+it, or from `setup.sh`). These files hold `.env` values in plaintext and no rotation step needs them. Keep one while you
+recover `.env` from it by hand; delete it after that.
+
+`finalize` keeps its own journal. Before it edits `.env` it makes a copy of `.env` (`.env.bak.*`) and records it in
+the entry (`finalizing`). If the run is killed after that, or `.env` cannot be restored after a failed verify, the entry
+keeps the record and `status` shows `(finalize interrupted: run finalize)`. `rollback` refuses the secret until then.
+Run `finalize <name>` again: it plans from the recorded copy, not from `.env`, so it never guesses what was dropped. It
+archives the retired values (again) unless you pass `--no-archive`, also when the first run used `--no-archive`. It accepts `.env` only if each edited
+variable holds its pre-finalize or its finalized value (otherwise: fix by hand), edits, rolls, verifies and records
+`finalized`. A retired OIDC PEM that the first run archived and deleted is skipped (`no retired value left to archive`, no new archive file). A one-shot secret has no `.env`
+edit: its re-run archives the old value from the stage backup again (harmless) and then deletes the backup.
+
+### Bundles
+
+Credentials that only work as a set are staged atomically, with one backup and one roll, and
+rolled back together: `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (`aws`), and
+`APPLE_WALLET_CERT_PATH` + `APPLE_WALLET_KEY_PATH` + `APPLE_WALLET_KEY_PASSWORD` (`apple_wallet`).
+Naming only some members is an error that names the bundle. If a required member is unset in `.env` the whole bundle is skipped (`skipped bundle <name>: <member> is unset, nothing was changed`); only optional members (`APPLE_WALLET_KEY_PASSWORD`, a key may have no password) may be unset. The optional member is always asked, even when it is empty in `.env`: Enter there means "the new key has no password" (it clears an old one) and never skips the bundle.
+
+States per secret: `idle|finalized -> pending -> staged -> (migrated) -> finalized` (`pending` is the journal entry during `stage`), `pending -> idle` and `staged -> idle` on rollback; for forward-only secrets `pending` resolves as described below.
+`SECRET_KEY` and `SALT_KEY` cannot finalize before `migrate` (not even with `--force`).
+One-shot secrets (a Stripe key, a token) sit in `staged` until you `finalize` them, which archives
+the old value and deletes the plaintext `.env.bak.*`; do this once the old credential is revoked.
+
+### Forward-only: `TELEGRAM_BOT_TOKEN`, `PUSHOVER_USER_KEY`
+
+BotFather `/revoke` kills the old token the moment you do it, so the old value cannot be restored.
+`stage TELEGRAM_BOT_TOKEN` (by name, never in a group or `--batch`) asks you to type
+`TELEGRAM REVOKED` once you have revoked, then for the new token. If `verify` fails, the new token is
+KEPT in `.env` and the tool prints the recovery steps (check the token, then
+`./deploy-rollout.sh roll telegram` and `rotate.py verify`). `rollback TELEGRAM_BOT_TOKEN` is refused while it is `staged`.
+If `stage` was killed and left it `pending`, `rollback TELEGRAM_BOT_TOKEN` only resolves the journal and never restores
+the revoked token: if `.env` holds the new token the entry becomes `staged` and the tool prints the manual recovery
+(check `.env`, `./deploy-rollout.sh roll telegram`, `rotate.py verify`); if `.env` is unchanged the new token was lost
+with the process, the entry goes back to `idle` and its backup is deleted, so get a fresh token and `stage` again.
+No state command is needed after a manual recovery: the entry is already `staged` (`stage` records it before the rollout), so `finalize TELEGRAM_BOT_TOKEN` is accepted once the token works.
+
+`PUSHOVER_USER_KEY` works the same way: the Pushover dashboard reset kills the old key at once. `stage PUSHOVER_USER_KEY`
+asks you to type `PUSHOVER RESET` once you have reset it, then for the new key; a failed `verify` keeps the new key.
+`CANARY_PASSWORD` is forward-only too: you change the canary account's password in the app before staging, so the old
+password is already dead. `stage CANARY_PASSWORD` (by name, not in a group or `--batch`) asks you to type `CANARY PASSWORD CHANGED`;
+a failed `verify` keeps the new password in `.env` and prints the recovery steps (`./deploy-rollout.sh roll canary` and `rotate.py verify canary`).
+`PUSHOVER_APP_TOKEN` is reversible: the old application keeps working until you delete it, so a failed `verify` rolls it back.
+
+### Verify
+
+Each probe prints PASS/FAIL, never a value:
+
+1. Rolled services are `running` and healthy (`docker compose ps --format json`; retried for 2 min).
+2. `GET /api/version` inside `web` (compose publishes no host ports, so probes run in the containers).
+3. Frontend `GET /` inside the `frontend` container (same check as its healthcheck).
+4. `docker compose exec -T web python manage.py check` exits 0; the warning IDs it prints are shown, and `oauth.W002` (unreadable OIDC key) fails.
+5. Lines at ERROR/CRITICAL in `docker compose logs --since <rollout start> web celery_default` at most 5 (`verify --error-threshold N`, inclusive).
+6. Advisory: `curl -fsS https://$API_DOMAIN/api/version` from the host.
+
+## Grace windows and why
+
+| Secret | Window | Reason |
+|---|---|---|
+| `SECRET_KEY` | 30 days | Refresh-token lifetime: sessions signed with the old key keep refreshing. Also needs `migrate`. |
+| `SALT_KEY` | until `migrate` verifies | Only encrypted columns depend on it; once every row is re-encrypted the old salt is dead weight. |
+| OIDC signing key | 30 days | The old public key stays in JWKS until ID tokens it signed have expired. |
+| `STRIPE_WEBHOOK_SECRETS` | 24 hours | Stripe lets the rolled secret live up to 24h. Set that expiry in the dashboard. |
+| everything else | none | Providers handle the overlap (expiry on the old key); `finalize` is only housekeeping. |
+
+`UNSUBSCRIBE_SIGNING_KEYS` follows the same introduce/promote pattern. If it is empty when
+`SECRET_KEY` phase 1 runs, the tool pins `<current SECRET_KEY>,<new random>`: the old key stays
+first, so containers still sign with it and old containers still verify, while every container
+learns the new one. In phase 2 it is reordered to `<new random>,<old SECRET_KEY>` (further entries
+kept in order), so links already in mailboxes keep verifying after the `SECRET_KEY` fallback is
+finalized away. A list that was not created by this run is never touched, and old unsubscribe keys
+are never dropped automatically (the list is long-lived by design). Rolling back phase 1 removes a
+pin created in that run; after phase 2 the pin is kept as it is.
+
+## First-run order
+
+Run on **demo first, always**, smoke-test it, then prod. Put first whatever invalidates the most,
+so the grace windows overlap.
+
+0. `./deploy.sh backup`; `rotate.py check` must be green on demo and prod. Set `ROTATION_AGE_RECIPIENT`.
+1. `rotate.py stage SECRET_KEY SALT_KEY`. A session obtained before still works; new logins work.
+2. `rotate.py migrate` (needs phase 2 done; re-encrypts TOTP secrets and integration tokens, then verifies with the primary key only).
+3. Third parties, in parallel with the windows running: follow each secret's printed console steps.
+   `rotate.py stage --group thirdparty --batch` (Stripe key and webhook secrets, Brevo SMTP key,
+   Google OAuth secrets, GCP service-account key, Cloudflare token, LLM / Hugging Face / IP2Location
+   keys, the Pushover app token, Discord, IndexNow, Eventbrite; not Telegram, not the Pushover user key and not the canary password). At each hidden prompt paste the new
+   value, or press Enter to skip that secret (its console step is not done yet). One `--batch` rolls once.
+4. `rotate.py stage TELEGRAM_BOT_TOKEN` last, by name (it is in no group; `PUSHOVER_USER_KEY` is staged the same way, by name, and so is `CANARY_PASSWORD`: see its forward-only procedure above). It is NOT reversible: revoke in BotFather first, then type `TELEGRAM REVOKED` and paste the new token. A failed verify keeps the new token and prints manual recovery steps. Only `telegram` restarts.
+5. `DB_PASSWORD` (below), in its window.
+6. `rotate.py stage OIDC_SIGNING_KEY_PATH`. Skipped automatically when unset.
+7. After the grace windows, run `rotate.py status` and finalize only the names it shows as `staged` or
+   `migrated` (secrets skipped earlier are `idle`): for example `rotate.py finalize SECRET_KEY SALT_KEY
+   OIDC_SIGNING_KEY_PATH STRIPE_WEBHOOK_SECRETS`, then the one-shot secrets once their old credentials are
+   revoked. In a multi-name `finalize`, a name that is `idle` or already `finalized` is a noted no-op; a
+   single idle name is an error. Let the old Stripe keys expire.
+8. `rotate.py check`, `rotate.py status`. Done. Calendar a reminder for the next round (and the Apple Wallet certificate expiry).
+
+Rotate `GRAFANA_ADMIN_PASSWORD` any time: `rotate.py stage GRAFANA_ADMIN_PASSWORD` resets it with
+`grafana cli admin reset-admin-password --password-from-stdin` (the env var only applies at first
+init) and updates `.env`. Nothing is restarted. `stage` refuses a current `GRAFANA_ADMIN_PASSWORD` or
+`DB_PASSWORD` that uses `$` interpolation (rollback could not restore the live credential): write the literal value first.
+
+## DB password (maintenance window)
+
+Not zero-downtime, by decision. `POSTGRES_PASSWORD` only applies when the volume is initialised,
+so changing `.env` alone does nothing.
+
+```bash
+ssh -t revel 'cd infra && ./rotation/rotate.py stage DB_PASSWORD --maintenance'
+```
+
+You must type `ROTATE DB PASSWORD`. The tool then: backs up `.env` and records the `pending` journal entry (both
+synced to disk); writes `DB_PASSWORD` to `.env` FIRST; only then runs `ALTER ROLE <DB_USER> PASSWORD ...`
+through `psql` in `revel_postgres` with a SCRAM-SHA-256 verifier computed on the host (stdin, never argv;
+the plaintext never reaches the server, whose `log_min_error_statement` would write a failed statement to its log);
+recreates `pgbouncer` and `postgres-exporter` (`up -d --no-deps --force-recreate`); rolls `web`, `celery_default`,
+`beat`, `telegram`; verifies. On failure it sets the old password back and rolls again. A kill after the `.env`
+write and before `ALTER ROLE` leaves the entry `pending` with the new password only in `.env`; `rollback DB_PASSWORD` is safe in
+both cases. Expect a few
+seconds of errors while the pooler restarts: schedule it for a quiet hour.
+
+`docker-compose.yml` feeds `DB_PASSWORD` to `revel_postgres` as `POSTGRES_PASSWORD`, so the next full
+`docker compose up -d` (for example `deploy.sh update`) will see a changed config on that container and
+recreate it. Do not run that casually afterwards; use `deploy-rollout.sh deploy` / `roll`.
+
+## Rolling services: `deploy-rollout.sh roll`
+
+`roll` applies the current `.env` and never pulls or changes images. It refuses to start when a container
+(running or stopped) of the backend or frontend image runs an older image than the local tag. Such a container
+would ship new code without its migrations. Other images (canary, alertmanager, grafana) are not checked.
+To recover, run `./deploy-rollout.sh deploy`. It rolls every component whose container is behind its local tag,
+even when the pull brings nothing new. It applies the migrations through the web rollout and rolls the rest.
+Then run `roll` again.
+
+`roll` also refuses a `web`, `celery_default` or `frontend` that has running and stopped replicas together:
+`docker rollout` would replace only the stopped one and leave the running replica on its old `.env`. Remove the
+stopped container (`docker compose ps -a`, then `docker rm <id>`) and run `roll` again. `roll` and `deploy` stop
+when `docker compose ps` fails for a service.
+
+## Disaster recovery: restoring a pre-rotation backup
+
+Columns in an old dump are encrypted under the `SECRET_KEY` x `SALT_KEY` of that time, and the
+retired values are in `rotation/archive/*.age`.
+
+1. From the infra root, save the current fallback lines, so that step 6 can put them back (they hold secrets: the
+   copy is mode 0600, and you delete it after step 6). Create it only once. If it exists, an earlier run of this
+   step already saved the original lines and may have added keys since: keep the file, do not overwrite it, and
+   carry on with the next instruction:
+   `if [ -e .env.fallbacks.pre-restore ]; then echo "keeping the snapshot from an earlier run"; else ( umask 077; grep -E '^(SECRET_KEY|SALT_KEY)_FALLBACKS=' .env > .env.fallbacks.tmp; [ $? -le 1 ] && mv .env.fallbacks.tmp .env.fallbacks.pre-restore ); fi`.
+   Then copy the retired keys into the `*_FALLBACKS` variables of `.env`. Pass **every** archive in
+   `rotation/archive/*.age`. That is the safe default: a retired value the dump does not need is harmless as a
+   fallback, and step 6 takes out the ones this step added. Do not filter by the date in a file name or by file mtime: names are
+   UTC while backups use host-local time, the first archive of a day carries no time, and copying the archive off
+   the host resets mtimes. If you must narrow the list, keep every file dated from the day *before* the backup
+   onwards. `finalize` writes one file per secret,
+   so rotating both keys leaves two files, and one file can hold several retired values. Every retired
+   `SECRET_KEY` / `SALT_KEY` found is added (an old dump decrypts under any of them) and values already in a
+   `*_FALLBACKS` variable are kept. The secrets never reach the terminal: the archives are decrypted into a fresh
+   `mktemp -d` directory (mode 0700) that the subshell deletes on exit, and only counts are printed. If no key is
+   found, `.env` is left unchanged and the step fails. Each archive is encrypted to the `ROTATION_AGE_RECIPIENT` set
+   when it was written, so use one identity file that holds the identity for **every** recipient ever used (put
+   one `AGE-SECRET-KEY-...` line per identity in it); otherwise the loop stops at the first archive it cannot
+   decrypt. Alternatively repeat the option: `age -d -i first.txt -i older.txt ...`. Keep retired identities as
+   long as their archives exist. Set `ID` to the quoted path of that file before you run the command.
+
+   ```sh
+   ID=/path/to/identities.txt
+   ( d=$(mktemp -d) && trap 'rm -rf "$d"' EXIT || exit 1
+     for f in rotation/archive/*.age; do  # or your narrowed list
+       age -d -i "$ID" -o "$d/$(basename "$f").env" "$f" || exit 1
+     done
+     python3 - "$d"/*.env <<'PY'
+   import sys
+   from pathlib import Path
+   sys.path.insert(0, "rotation")
+   from rotate import get_env, set_env, write_atomic
+   lines = [line for p in sys.argv[1:] for line in Path(p).read_text().splitlines()]
+   env = Path(".env")
+   text, found = env.read_text(), 0
+   for key in ("SECRET_KEY", "SALT_KEY"):
+       prefix = key + "="  # archive records hold the value verbatim: no quoting, no comment stripping
+       retired = list(dict.fromkeys(line[len(prefix):] for line in lines if line.startswith(prefix) and line[len(prefix):]))
+       current = [v for v in (get_env(text, f"{key}_FALLBACKS") or "").split(",") if v]
+       if retired:
+           text = set_env(text, f"{key}_FALLBACKS", ",".join(current + [v for v in retired if v not in current]))
+       found += len(retired)
+       print(f"{key}_FALLBACKS: {len(retired)} retired value(s) found")
+   if not found:
+       sys.exit("no SECRET_KEY / SALT_KEY in these archives: .env NOT changed")
+   write_atomic(env, text)
+   PY
+   )
+   ```
+2. Stop every writer first: `docker compose stop web celery_default beat telegram`. Keep users off the site (your
+   maintenance page, if you use one). A writer that reads a restored row without the retired keys can save it back
+   corrupted (see above).
+3. Restore the dump.
+4. Start the writers on the new `.env`: `docker compose up -d --no-deps web celery_default beat telegram`.
+5. `docker compose exec -T web python manage.py rotate_encrypted_fields`, then `... --verify`. Keep the site closed
+   until `--verify` succeeds. If it fails, do NOT remove the fallbacks: fix the cause and run it again.
+6. Put the two `*_FALLBACKS` variables back to the lines saved in step 1: remove only the values that step 1 added,
+   and keep every value that was there before. Then delete `.env.fallbacks.pre-restore` and roll:
+   `./deploy-rollout.sh roll web celery_default beat telegram`.
+
+Each `finalize` writes its own age file (mode 0600, UTC). `age` writes to a hidden `.archive-*.part` file; the file is synced and
+linked under its final name only when it is complete, so no `*.age` file is ever partial. Names: `<YYYY-MM-DD>.age`, or
+`<YYYY-MM-DD-HHMMSS>-<NAME>.age` when that exists, or `<YYYY-MM-DD-HHMMSS>-<NAME>-<N>.age` when that exists too.
+age streams cannot be concatenated, so nothing is appended. Archived OIDC keys appear as
+`OIDC_SIGNING_KEY_FILE:<path>=<base64 PEM>`. Back the archive up off the host.
+
+## Warning: do not re-run `setup.sh` on a rotated install
+
+`setup.sh` regenerates `SECRET_KEY` and `SALT_KEY` and rewrites `.env` (the old file is kept as a
+backup). On an install that has been rotated that discards the current keys, the fallbacks and the
+unsubscribe pin, and makes encrypted columns unreadable. Restore the needed values from that backup
+or from the `age` archive instead of re-running the wizard.
+
+## Tests
+
+```bash
+python3 -m unittest rotation/test_rotate.py
+```
+
+Docker is mocked entirely. Also run in CI (`.github/workflows/rotation.yml`) together with `rotate.py check`.
