@@ -782,7 +782,8 @@ class ReviewRound3Tests(Base):
 
     def test_empty_prompt_is_a_skip_not_an_error(self) -> None:
         rot = self.make(prompts=["", "  "], files=[r.TELEGRAM_CONFIRM_PHRASE])
-        self.assertEqual(rot.stage(["STRIPE_SECRET_KEY", "TELEGRAM_BOT_TOKEN"]), 0)
+        self.assertEqual(rot.stage(["STRIPE_SECRET_KEY", "TELEGRAM_BOT_TOKEN"]), 1)  # blank after a forward-only confirm is an error
+        self.assertIn("a new value is required", "\n".join(self.out))
         self.assertIn("skipped STRIPE_SECRET_KEY", "\n".join(self.out))
         self.assertEqual(self.env("STRIPE_SECRET_KEY"), "sk_old")
         self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "idle")
@@ -2114,6 +2115,93 @@ class CodeRabbitRound5ScriptTests(unittest.TestCase):
         self.assertNotEqual(res.returncode, 0)
         self.assertNotIn("REACHED", res.stdout)
         self.assertIn("docker compose ps failed for web", res.stderr)
+
+
+class CodeRabbitRound5Tests(Base):
+    MULTI = "MULTI='line one\nSTRIPE_SECRET_KEY=example\nline three'\n"
+
+    def test_a_multiline_quoted_value_makes_every_edit_refuse(self) -> None:
+        text = ENV + self.MULTI + "STRIPE_SECRET_KEY=real\n"
+        with self.assertRaisesRegex(r.RotationError, "MULTI has a quoted value that spans lines"):
+            r.set_env(text, "STRIPE_SECRET_KEY", "new")
+        r.set_env(ENV + "OK='one line' # c\nQ=\"a b\"\n", "STRIPE_SECRET_KEY", "new")  # single-line quotes are fine
+
+    def test_stage_refuses_a_multiline_value_before_any_prompt_or_backup(self) -> None:
+        (self.tmp / ".env").write_text(ENV + self.MULTI)
+        before = (self.tmp / ".env").read_text()
+        rot = self.make()  # no prompts: a prompt would raise StopIteration
+        with self.assertRaisesRegex(r.RotationError, "spans lines"):
+            rot.stage(["STRIPE_SECRET_KEY"])
+        self.assertEqual((self.tmp / ".env").read_text(), before)
+        self.assertEqual(list(self.tmp.glob(".env.bak.*")), [])
+
+    def test_new_directories_are_synced_in_their_parents(self) -> None:
+        synced: list[Path] = []
+        with mock.patch.object(r, "fsync_dir", synced.append):
+            rot = self.make()
+            with rot.lock():
+                pass
+            self.assertEqual(synced, [self.tmp])  # rotation/ was created in the deploy dir
+            synced.clear()
+            with rot.lock():  # exists now: nothing to sync
+                pass
+            self.assertEqual(synced, [])
+            r.mkdir_synced(self.tmp / "rotation" / "archive")
+            self.assertEqual(synced, [self.tmp / "rotation"])
+
+    def test_verify_by_name_refuses_when_service_discovery_fails(self) -> None:
+        rot = self.make(fail=lambda l: "--profile * config" in l)
+        self.assertEqual(r.main(["--dir", str(self.tmp), "verify", "web", "alertmanger"], rotator=rot), 1)
+        self.assertFalse([x for x in self.runner.argv_lines() if x.startswith("docker compose ps")])
+        with self.assertRaisesRegex(r.RotationError, "cannot list the services"):
+            rot.check_verify_names(["web", "alertmanger"], ["web"])
+
+    def test_one_unhealthy_replica_fails_the_service(self) -> None:
+        rot = self.make()
+        rows = [{"Service": "web", "State": "running", "Health": "healthy"},
+                {"Service": "web", "State": "running", "Health": "unhealthy"},
+                {"Service": "frontend", "State": "running", "Health": ""}]
+        with mock.patch.object(rot, "compose", return_value=SimpleNamespace(returncode=0, stdout=json.dumps(rows))):
+            self.assertEqual(rot._unhealthy(["web", "frontend"]), ["web"])
+        rows[1]["Health"] = "healthy"
+        with mock.patch.object(rot, "compose", return_value=SimpleNamespace(returncode=0, stdout=json.dumps(rows))):
+            self.assertEqual(rot._unhealthy(["web", "frontend", "beat"]), ["beat"])  # no row at all is also down
+
+    def test_the_new_oidc_key_and_its_directory_are_synced_before_staging_completes(self) -> None:
+        rot = self.make()
+        synced: list[Path] = []
+        with mock.patch.object(r, "fsync_dir", synced.append):
+            rot.stage(["OIDC_SIGNING_KEY_PATH"])
+        self.assertIn(self.tmp / "certs", synced)
+        self.assertEqual(rot.step_of("OIDC_SIGNING_KEY_PATH"), "staged")
+
+    def test_a_failed_oidc_sync_changes_nothing(self) -> None:
+        rot = self.make()
+        before = (self.tmp / ".env").read_text()
+
+        def fail_on_certs(path: Path) -> None:
+            if path == self.tmp / "certs":
+                raise OSError(5, "Input/output error")
+
+        with mock.patch.object(r, "fsync_dir", fail_on_certs):
+            self.assertEqual(rot.stage(["OIDC_SIGNING_KEY_PATH"]), 1)
+        self.assertEqual((self.tmp / ".env").read_text(), before)
+        self.assertEqual([p.name for p in (self.tmp / "certs").iterdir()], ["oidc.pem"])  # no half-synced new key
+        self.assertEqual(rot.step_of("OIDC_SIGNING_KEY_PATH"), "idle")
+
+    def test_blank_input_after_the_canary_confirmation_is_an_error(self) -> None:
+        (self.tmp / ".env").write_text(ENV + "CANARY_PASSWORD=cp_old\n")
+        rot = self.make(prompts=[""], files=[r.CANARY_CONFIRM_PHRASE])
+        self.assertEqual(rot.stage(["CANARY_PASSWORD"]), 1)
+        self.assertIn("a new value is required", "\n".join(self.out))
+        self.assertEqual(rot.step_of("CANARY_PASSWORD"), "idle")
+
+    def test_a_non_ascii_current_db_password_is_refused_before_any_prompt(self) -> None:
+        (self.tmp / ".env").write_text(ENV.replace("DB_PASSWORD=olddbpass", 'DB_PASSWORD="p\u00e4ss"'))
+        rot = self.make(maintenance=True)  # no prompts: the confirmation prompt would raise StopIteration
+        self.assertEqual(rot.stage(["DB_PASSWORD"]), 1)
+        self.assertIn("not ASCII", "\n".join(self.out))
+        self.assertFalse([c for c in self.runner.calls if "psql" in c.argv])
 
 
 if __name__ == "__main__":

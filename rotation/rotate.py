@@ -86,6 +86,18 @@ def encode_value(value: str, quote: str | None) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
 
 
+def refuse_multiline(text: str) -> None:
+    """Fail closed on a quoted value that spans lines: a line inside it could be read as a real assignment."""
+    for line in text.split("\n"):
+        m = _LINE.match(line)
+        if not m:
+            continue
+        rest = m.group("rest").lstrip()
+        if rest[:1] in ("'", '"') and not (_DQ.match(rest) or _SQ.match(rest)):
+            raise RotationError(f"{m.group('key')} has a quoted value that spans lines: edit .env by hand or put "
+                                "the value on one line first; nothing was changed")
+
+
 def get_env(text: str, name: str) -> str | None:
     """Effective (last) assignment of ``name``; None if absent."""
     found = None
@@ -98,6 +110,7 @@ def get_env(text: str, name: str) -> str | None:
 
 def set_env(text: str, name: str, value: str) -> str:
     """Return ``text`` with only ``name``'s effective line changed (idempotent, order/comments kept)."""
+    refuse_multiline(text)
     lines = text.split("\n")
     for i in range(len(lines) - 1, -1, -1):
         m = _LINE.match(lines[i])
@@ -125,6 +138,14 @@ def fsync_dir(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def mkdir_synced(path: Path) -> None:
+    """mkdir -p, then sync the parent of each directory this call created: a later file sync does not persist them."""
+    created = [p for p in (path, *path.parents) if not p.exists()]
+    path.mkdir(parents=True, exist_ok=True)
+    for p in created:
+        fsync_dir(p.parent)
 
 
 class DirSyncError(OSError):
@@ -288,7 +309,7 @@ class Rotator:
     def lock(self):
         """One mutating command at a time: they read-modify-write .env and state.json. The lock is held for the
         whole command (flock, released when the process ends) and a second command fails at once."""
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        mkdir_synced(self.state_path.parent)
         fd = os.open(self.state_path.with_name("state.lock"), os.O_WRONLY | os.O_CREAT, 0o600)
         try:
             try:
@@ -306,7 +327,7 @@ class Rotator:
         return {"version": 1, "secrets": {}}
 
     def save_state(self, state: dict[str, Any]) -> None:
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        mkdir_synced(self.state_path.parent)
         write_atomic(self.state_path, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
     def step_of(self, name: str) -> str:
@@ -369,11 +390,13 @@ class Rotator:
     def check_verify_names(self, requested: list[str], kept: list[str]) -> None:
         """Reject an undefined name, note an inactive one, and refuse an explicit list that checks nothing."""
         r = self.compose("--profile", "*", "config", "--services")
-        if r.returncode == 0 and r.stdout.strip():
-            defined = set(r.stdout.split())
-            unknown = [s for s in requested if s not in defined]
-            if unknown:
-                raise RotationError(f"unknown service(s): {', '.join(unknown)} (not defined in docker-compose.yml)")
+        if r.returncode != 0 or not r.stdout.strip():  # a typo and an inactive name look alike without the list
+            raise RotationError("cannot list the services in docker-compose.yml (docker compose config failed): "
+                                "refusing to verify by name")
+        defined = set(r.stdout.split())
+        unknown = [s for s in requested if s not in defined]
+        if unknown:
+            raise RotationError(f"unknown service(s): {', '.join(unknown)} (not defined in docker-compose.yml)")
         skipped = [s for s in requested if s not in kept]
         if skipped:
             self.out(f"skipped (not in the active compose profiles): {', '.join(skipped)}")
@@ -429,8 +452,10 @@ class Rotator:
             rows = json.loads(text) if text.startswith("[") else [json.loads(x) for x in text.splitlines() if x]
         except ValueError:
             return list(services)
-        good = {x.get("Service") for x in rows if x.get("State") == "running" and x.get("Health", "") in ("", "healthy")}
-        return [s for s in services if s not in good]
+        # Every reported replica of a service must be up: one healthy row must not hide an unhealthy one.
+        seen = {x.get("Service") for x in rows}
+        down = {x.get("Service") for x in rows if x.get("State") != "running" or x.get("Health", "") not in ("", "healthy")}
+        return [s for s in services if s not in seen or s in down]
 
     # ---- staging
     def prepare(self, s: mf.Secret, env: str) -> Staged | None:
@@ -453,6 +478,16 @@ class Rotator:
                     host_new.unlink(missing_ok=True)
                     raise RotationError("openssl genpkey failed")
                 os.chmod(host_new, 0o644)  # containers run as uid 997: must be world-readable
+                try:  # .env must never name a PEM that a power loss can take away
+                    fd = os.open(host_new, os.O_RDONLY)
+                    try:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                    fsync_dir(host_new.parent)
+                except OSError as e:
+                    host_new.unlink(missing_ok=True)
+                    raise RotationError(f"could not sync the new key file ({e.strerror}): nothing was changed") from None
 
             return Staged({s.name: new, fb: ",".join(csv_prepend(csv_split(cur(fb)), old))}, [s.name, fb],
                           list(s.services), {"new_key_file": str(host_new), "retired_paths": [old]}, before=make_key)
@@ -478,6 +513,9 @@ class Rotator:
                     raise RotationError("confirmation phrase mismatch, aborted")
             val = self.prompt_secret(f"New value for {s.name} (hidden, empty = skip): ")
             if not val.strip():
+                if not s.reversible:  # the old value is already revoked: a skip would leave .env with a dead value
+                    raise RotationError(f"{s.name} was confirmed as changed, so a new value is required: run `stage "
+                                        f"{s.name}` again and enter it")
                 self.out(f"skipped {s.name}")
                 return None
             if re.search(r"[\r\n\x00]", val):
@@ -509,6 +547,9 @@ class Rotator:
         user, db = get_env(env, "DB_USER") or "", get_env(env, "DB_NAME") or ""
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", user) or not db:
             raise RotationError("DB_USER must be a plain identifier and DB_NAME must be set")
+        if not (get_env(env, s.name) or "").isascii():  # rollback must be able to restore it (SCRAM verifier)
+            raise RotationError("the current DB_PASSWORD is not ASCII, so a failed rotation could not restore it: "
+                                "nothing was changed")
         if self.prompt(f"This recreates pgbouncer and rolls the app. Type '{DB_CONFIRM_PHRASE}' to continue: ") \
                 != DB_CONFIRM_PHRASE:
             raise RotationError("confirmation phrase mismatch, aborted")
@@ -568,6 +609,7 @@ class Rotator:
     def stage(self, names: list[str], batch: bool = False) -> int:
         """Stage each secret; returns the number of failures."""
         self.refuse_if_interrupted()
+        refuse_multiline(self.env_text())  # before any prompt: every edit below would refuse it anyway
         for n in names:
             if n in mf.NOT_DIRECTLY_ROTATABLE:
                 raise RotationError(
@@ -980,7 +1022,7 @@ class Rotator:
         return recipient
 
     def archive(self, recipient: str, name: str, lines: list[str]) -> Path:
-        self.archive_dir.mkdir(parents=True, exist_ok=True)
+        mkdir_synced(self.archive_dir)
         stamp = self.now()
         # One age stream per file. The file is created exclusively (0600), so two finalizations in the
         # same second can never pick, or append to, the same path.
