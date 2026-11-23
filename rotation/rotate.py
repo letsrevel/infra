@@ -109,8 +109,8 @@ def get_env(text: str, name: str) -> str | None:
 
 
 def has_interpolation(text: str, name: str) -> bool:
-    """True when the effective assignment of ``name`` holds a ``$`` that Compose would expand (``${X}``).
-    A single-quoted value, ``\\$`` and ``$$`` are literal."""
+    """True when the effective assignment of ``name`` holds a ``$`` that Compose would expand (``${X}`` or
+    ``$NAME``). A single-quoted value, ``\\$``, ``$$`` and a ``$`` before any other character are literal."""
     found = None
     for line in text.split("\n"):
         m = _LINE.match(line)
@@ -123,7 +123,7 @@ def has_interpolation(text: str, name: str) -> bool:
     else:
         c = re.search(r"\s#", found)
         body = found[: c.start()] if c else found
-    return "$" in re.sub(r"\\.|\$\$", "", body)
+    return re.search(r"\$[{A-Za-z_]", re.sub(r"\\.|\$\$", "", body)) is not None
 
 
 def set_env(text: str, name: str, value: str) -> str:
@@ -474,7 +474,9 @@ class Rotator:
             rows = json.loads(text) if text.startswith("[") else [json.loads(x) for x in text.splitlines() if x]
         except ValueError:
             return list(services)
-        rows = [x for x in rows if "com.docker.compose.oneoff=True" not in (x.get("Labels") or "")]
+        # older JSON-array output has no Labels: also drop `compose run` names (<project>-<service>-run-<id>)
+        rows = [x for x in rows if "com.docker.compose.oneoff=True" not in (x.get("Labels") or "")
+                and not re.search(r"-run-[0-9a-f]+$", x.get("Name") or "")]
         # Every reported replica of a service must be up: one healthy row must not hide an unhealthy one.
         seen = {x.get("Service") for x in rows}
         down = {x.get("Service") for x in rows if x.get("State") != "running" or x.get("Health", "") not in ("", "healthy")}
@@ -786,8 +788,8 @@ class Rotator:
                 raise RotationError(f"{name} is unset")
             if has_interpolation(env, name):
                 raise RotationError(f"current {name} uses $ interpolation (for example ${{VAR}}): the old key cannot "
-                                    f"be copied into {fb} as it is. Write the literal value in .env first; "
-                                    "nothing was changed")
+                                    f"be copied into {fb} as it is. Write the literal value in .env first "
+                                    "(single-quote the value or write $$ if it is literal); nothing was changed")
             if "," in old:
                 raise RotationError(f"current {name} contains a comma and cannot be kept in the {fb} list")
             existing = csv_split(get_env(env, fb))
@@ -966,6 +968,22 @@ class Rotator:
                                     "promote it again, or `migrate` once phase 2 is complete")
         fallback = s.kind == mf.GENERATED_WITH_FALLBACK
         env = self.env_text()
+        if not fallback and all(entries[n].get("step") == "pending" and not entries[n].get("rollback_incomplete")
+                                and self._env_unchanged(env, entries[n]) for n in names):
+            # Killed before the .env write: .env, the live credentials and the running services were never
+            # touched, so there is nothing to undo. No roll and no verify (a verify could only fail on an
+            # unrelated cause and would strand the entry as pending). Only the key file this stage made goes.
+            for n in names:
+                if entries[n].get("new_key_file"):
+                    Path(entries[n]["new_key_file"]).unlink(missing_ok=True)
+                    self.out(f"[{n}] removed the key file this stage created: {entries[n]['new_key_file']}")
+            for n in names:
+                self.update_state(n, step="idle", backups=[], rolled_back_reason=reason, rollback_incomplete=False)
+            for n in names:
+                self._unlink_unreferenced(entries[n].get("backups", [entries[n]["backup"]]))
+                self.out(f"[{n}] the interrupted stage never changed .env: nothing to undo, no roll, no verify "
+                         f"(journal cleared, now idle)")
+            return
         old_pw = None
         for n in names:
             old_env = (self.base / entries[n]["backup"]).read_text(encoding="utf-8")
@@ -1026,6 +1044,10 @@ class Rotator:
         for n in names:
             self._unlink_unreferenced(entries[n].get("backups", [entries[n]["backup"]]))
             self.out(f"[{n}] rolled back ({reason})")
+
+    def _env_unchanged(self, env: str, entry: dict[str, Any]) -> bool:
+        old_env = (self.base / entry["backup"]).read_text(encoding="utf-8")
+        return all(get_env(env, v) == get_env(old_env, v) for v in entry["vars"])
 
     def _resolve_pending_forward_only(self, name: str, s: mf.Secret, entry: dict[str, Any]) -> None:
         """Clear the journal of a forward-only secret whose `stage` was killed. The old value is revoked at

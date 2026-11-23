@@ -2410,9 +2410,9 @@ class RoundSevenTests(Base):
         self.assertEqual(rot.step_of("SALT_KEY"), "idle")
 
     def test_literal_dollars_are_not_interpolation(self) -> None:
-        for raw in ("'a$b'", '"a\\$b"', "a$$b", "plain"):
+        for raw in ("'a$b'", '"a\\$b"', "a$$b", "plain", "x$%y", "trail$", "abc$1", "'$HOME'"):
             self.assertFalse(r.has_interpolation(f"K={raw}\n", "K"), raw)
-        for raw in ('"${X}"', "$X", '"a$b"'):
+        for raw in ('"${X}"', "$X", '"a$b"', "$HOME", "${VAR}", "pre${X}post"):
             self.assertTrue(r.has_interpolation(f"K={raw}\n", "K"), raw)
 
     def test_a_failed_verify_after_a_rollback_keeps_the_journal_and_the_key_file(self) -> None:
@@ -2428,6 +2428,45 @@ class RoundSevenTests(Base):
         rot.rollback("OIDC_SIGNING_KEY_PATH")
         self.assertEqual(rot.step_of("OIDC_SIGNING_KEY_PATH"), "idle")
         self.assertFalse(Path(entry["new_key_file"]).exists())
+
+    def test_a_rollback_with_nothing_to_undo_skips_the_roll_and_the_verify(self) -> None:
+        rot = self.make()
+        self.assertEqual(rot.stage(["OIDC_SIGNING_KEY_PATH"]), 0)
+        entry = rot.load_state()["secrets"]["OIDC_SIGNING_KEY_PATH"]
+        pem = Path(entry["new_key_file"])
+        self.assertTrue(pem.exists())
+        (self.tmp / ".env").write_text((self.tmp / entry["backup"]).read_text())  # killed after pre, before the .env write
+        _interrupt(rot, "OIDC_SIGNING_KEY_PATH")
+        rot = self.make(fail=lambda line: line.endswith("manage.py check"))  # any verify would fail
+        rot.rollback("OIDC_SIGNING_KEY_PATH")
+        self.assertEqual(rot.step_of("OIDC_SIGNING_KEY_PATH"), "idle")
+        self.assertFalse(pem.exists())
+        self.assertEqual((self.tmp / ".env").read_text(), ENV)
+        self.assertFalse([c for c in rot.runner.calls if "manage.py" in " ".join(c.argv) or "roll" in " ".join(c.argv)])
+        rot.refuse_if_interrupted()  # no longer blocks other commands
+
+    def test_a_real_restore_with_a_failing_verify_still_raises_and_keeps_the_journal(self) -> None:
+        rot = self.make(prompts=["sk_new"])
+        rot.stage(["STRIPE_SECRET_KEY"])
+        _interrupt(rot, "STRIPE_SECRET_KEY")  # .env holds the new value
+        rot = self.make(fail=lambda line: line.endswith("manage.py check"))
+        with self.assertRaises(r.RotationError):
+            rot.rollback("STRIPE_SECRET_KEY")
+        self.assertEqual(rot.step_of("STRIPE_SECRET_KEY"), "pending")
+        self.assertTrue(rot.load_state()["secrets"]["STRIPE_SECRET_KEY"]["rollback_incomplete"])
+
+    def test_an_older_array_format_one_off_row_is_not_counted_as_down(self) -> None:
+        rot = self.make()
+        rows = [{"Service": "web", "Name": "revel-web-1", "State": "running", "Health": ""},
+                {"Service": "web", "Name": "revel-web-run-1a2b3c4d5e6f", "State": "exited", "Health": ""}]
+        with mock.patch.object(rot, "compose", return_value=SimpleNamespace(returncode=0, stdout=json.dumps(rows))):
+            self.assertEqual(rot._unhealthy(["web"]), [])
+
+
+def _interrupt(rot: r.Rotator, name: str) -> None:
+    state = rot.load_state()
+    state["secrets"][name]["step"] = "pending"
+    rot.save_state(state)
 
 
 if __name__ == "__main__":
