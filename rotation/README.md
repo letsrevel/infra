@@ -139,6 +139,7 @@ If `stage` was killed and left it `pending`, `rollback TELEGRAM_BOT_TOKEN` only 
 the revoked token: if `.env` holds the new token the entry becomes `staged` and the tool prints the manual recovery
 (check `.env`, `./deploy-rollout.sh roll telegram`, `rotate.py verify`); if `.env` is unchanged the new token was lost
 with the process, the entry goes back to `idle` and its backup is deleted, so get a fresh token and `stage` again.
+No state command is needed after a manual recovery: the entry is already `staged` (`stage` records it before the rollout), so `finalize TELEGRAM_BOT_TOKEN` is accepted once the token works.
 
 `PUSHOVER_USER_KEY` works the same way: the Pushover dashboard reset kills the old key at once. `stage PUSHOVER_USER_KEY`
 asks you to type `PUSHOVER RESET` once you have reset it, then for the new key; a failed `verify` keeps the new key.

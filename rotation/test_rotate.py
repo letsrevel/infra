@@ -2490,6 +2490,51 @@ class RoundSevenTests(Base):
         self.assertEqual(ps([labelled, named], ""), (["web"], 1))  # inspected as a replica: stopped counts as down
 
 
+class RoundTenTests(Base):
+    def test_colon_assignment_of_a_managed_key_is_refused(self) -> None:
+        (self.tmp / ".env").write_text(ENV.replace("STRIPE_SECRET_KEY=sk_old", "STRIPE_SECRET_KEY: sk_old"))
+        before = (self.tmp / ".env").read_text()
+        rot = self.make(prompts=["sk_new"])
+        with self.assertRaisesRegex(r.RotationError, "STRIPE_SECRET_KEY is written as `KEY: value`"):
+            rot.stage(["STRIPE_SECRET_KEY"])
+        self.assertEqual((self.tmp / ".env").read_text(), before)
+        self.assertIn("STRIPE_SECRET_KEY", r.env_keys(before))  # check sees it as present
+        self.assertEqual(r.refuse_multiline("NOT_MANAGED: x\nURL=http://a\n"), None)
+
+    def test_wallet_password_keeps_its_whitespace(self) -> None:
+        (self.tmp / ".env").write_text(ENV + "APPLE_WALLET_CERT_PATH=/app/certs/c0.pem\n"
+                                       "APPLE_WALLET_KEY_PATH=/app/certs/k0.pem\nAPPLE_WALLET_KEY_PASSWORD=\n")
+        for n in ("c1.pem", "k1.pem"):
+            (self.tmp / "certs" / n).write_text("x")
+            os.chmod(self.tmp / "certs" / n, 0o644)
+        rot = self.make(prompts=["pass "], files=["/app/certs/c1.pem", "/app/certs/k1.pem"])
+        self.assertEqual(rot.stage(["APPLE_WALLET_CERT_PATH", "APPLE_WALLET_KEY_PATH", "APPLE_WALLET_KEY_PASSWORD"]), 0)
+        self.assertEqual(self.env("APPLE_WALLET_KEY_PASSWORD"), "pass ")
+
+    def test_rollback_restores_an_interpolated_assignment_as_written(self) -> None:
+        (self.tmp / ".env").write_text(ENV.replace("STRIPE_SECRET_KEY=sk_old", "SRC=sk_src\nSTRIPE_SECRET_KEY=\"${SRC}\""))
+        rot = self.make(prompts=["sk_new"], fail=first_check_fails())
+        self.assertEqual(rot.stage(["STRIPE_SECRET_KEY"]), 1)  # verify fails, so it rolls back
+        text = (self.tmp / ".env").read_text()
+        self.assertIn('\nSTRIPE_SECRET_KEY="${SRC}"\n', text)
+        self.assertNotIn("\\$", text)
+
+    def test_phase2_refuses_a_key_that_is_not_the_one_phase1_introduced(self) -> None:
+        (self.tmp / ".env").write_text(ENV.replace("SALT_KEY_FALLBACKS=", "SALT_KEY_FALLBACKS=older"))
+        calls = []
+        rot = self.make(on_roll=lambda _l: (calls.append(1), len(calls) == 1 and (_ for _ in ()).throw(KeyboardInterrupt())))
+        with self.assertRaises(KeyboardInterrupt):
+            rot.stage(["SALT_KEY"])
+        older, introduced = self.env("SALT_KEY_FALLBACKS").split(",")
+        self.assertEqual(older, "older")
+        (self.tmp / ".env").write_text((self.tmp / ".env").read_text().replace(
+            f"SALT_KEY_FALLBACKS=older,{introduced}", f"SALT_KEY_FALLBACKS={introduced},older"))
+        rot = self.make()
+        self.assertEqual(rot.stage(["SALT_KEY"]), 1)
+        self.assertIn("not the one phase 1 introduced", "\n".join(self.out))
+        self.assertEqual(self.env("SALT_KEY"), "oldsalt+/=")
+
+
 def _interrupt(rot: r.Rotator, name: str) -> None:
     state = rot.load_state()
     state["secrets"][name]["step"] = "pending"

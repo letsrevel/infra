@@ -57,6 +57,8 @@ def utcnow() -> datetime:
 
 # --------------------------------------------------------------------------- env file editing
 _LINE = re.compile(r"^(?P<pre>\s*(?:export\s+)?)(?P<key>[A-Za-z_][A-Za-z0-9_]*)(?P<gap>[ \t]*)=(?P<rest>.*)$")
+# compose-go's dotenv parser also takes `KEY: value`; this tool edits only `KEY=value`, so it refuses the colon form
+_COLON = re.compile(r"^\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)[ \t]*:(?!//)")
 _DQ = re.compile(r'^"((?:[^"\\]|\\.)*)"(.*)$')
 _SQ = re.compile(r"^'((?:[^'\\]|\\.)*)'(.*)$")
 _SAFE = re.compile(r"[A-Za-z0-9_.~:/@%+,=\-]*")
@@ -88,7 +90,11 @@ def encode_value(value: str, quote: str | None) -> str:
 
 def refuse_multiline(text: str) -> None:
     """Fail closed on a quoted value that spans lines: a line inside it could be read as a real assignment."""
+    managed = {x for sec in MANIFEST.values() for x in (sec.name, sec.fallback_var, *sec.extra_vars) if x}
     for line in text.split("\n"):
+        if (c := _COLON.match(line)) and c.group("key") in managed:
+            raise RotationError(f"{c.group('key')} is written as `KEY: value`, which this tool cannot edit: "
+                                "change it to `KEY=value` in .env first; nothing was changed")
         m = _LINE.match(line)
         if not m:
             continue
@@ -144,8 +150,24 @@ def set_env(text: str, name: str, value: str) -> str:
     return f"{base}{name}={encode_value(value, None)}\n"
 
 
+def restore_env(env: str, old_env: str, name: str) -> str:
+    """Put ``name`` back as ``old_env`` had it. An interpolated assignment (``${X}``) is copied as the original
+    line, so Compose expands it again; set_env would write the expression as a literal value."""
+    if not has_interpolation(old_env, name):
+        return set_env(env, name, get_env(old_env, name) or "")
+    refuse_multiline(env)
+    raw = [m.group(0) for line in old_env.split("\n") if (m := _LINE.match(line)) and m.group("key") == name][-1]
+    lines = env.split("\n")
+    for i in range(len(lines) - 1, -1, -1):
+        m = _LINE.match(lines[i])
+        if m and m.group("key") == name:
+            lines[i] = raw
+            return "\n".join(lines)
+    return (env if env == "" or env.endswith("\n") else env + "\n") + raw + "\n"
+
+
 def env_keys(text: str, commented: bool = False) -> set[str]:
-    keys = {m.group("key") for line in text.split("\n") if (m := _LINE.match(line))}
+    keys = {m.group("key") for line in text.split("\n") if (m := _LINE.match(line) or _COLON.match(line))}
     if commented:
         keys |= set(re.findall(r"^\s*#\s*([A-Z][A-Z0-9_]*)=", text, re.M))
     return keys
@@ -227,6 +249,11 @@ def csv_prepend(items: list[str], new: str) -> list[str]:
 
 def csv_drop(items: list[str], drop: list[str]) -> list[str]:
     return [i for i in items if i not in drop]
+
+
+def key_fp(key: str) -> str:
+    """Non-secret identity of a generated key (a hash prefix), recorded in the journal."""
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
 def generate_secret(nbytes: int = 50) -> str:
@@ -592,7 +619,7 @@ class Rotator:
     def _prepare_optional(self, s: mf.Secret, env: str) -> Staged | None:
         """A bundle member that may be empty: empty input means "the new value is empty", never "skip the bundle"."""
         self.out(s.instructions)
-        val = self.prompt_secret(f"New {s.name} (hidden, empty = none): ").strip()
+        val = self.prompt_secret(f"New {s.name} (hidden, empty = none): ")  # kept as typed: a trailing space may be part of it
         if re.search(r"[\r\n\x00]", val):
             raise RotationError("value contains a newline")
         if val == (get_env(env, s.name) or ""):  # no .env edit, but still a member of this rotation's journal
@@ -805,7 +832,8 @@ class Rotator:
             if "," in old:
                 raise RotationError(f"current {name} contains a comma and cannot be kept in the {fb} list")
             existing = csv_split(get_env(env, fb))
-            edits = {fb: ",".join(existing + [generate_secret()])}
+            introduced = generate_secret()
+            edits = {fb: ",".join(existing + [introduced])}
             touched, pin = [fb], False
             if name == "SECRET_KEY" and not csv_split(get_env(env, "UNSUBSCRIBE_SIGNING_KEYS")):
                 # Pin, introduced like the keys: the old key stays FIRST (containers keep signing with it,
@@ -816,7 +844,7 @@ class Rotator:
                 pin = True
             self.out(f"[{name}] phase 1/2: introduce the new key as a fallback")
             self._commit([(s, Staged(edits, touched, list(s.services),
-                                     {"phase": 1, "new_index": len(existing), "ever_primary": False,
+                                     {"phase": 1, "new_index": len(existing), "new_fp": key_fp(introduced), "ever_primary": False,
                                       "pin_created": pin}))], True)
             entry = self.load_state()["secrets"][name]
         else:
@@ -837,6 +865,9 @@ class Rotator:
         if entry["new_index"] >= len(fallbacks):
             raise RotationError(f"{fb} no longer holds the introduced key; fix by hand")
         new = fallbacks[entry["new_index"]]
+        if key_fp(new) != entry.get("new_fp"):
+            raise RotationError(f"the key at position {entry['new_index']} of {fb} is not the one phase 1 "
+                                "introduced (the list was edited): nothing was promoted; fix by hand")
         edits = {name: new, fb: ",".join([old] + [x for x in fallbacks if x not in (old, new)])}
         pin = csv_split(get_env(env, "UNSUBSCRIBE_SIGNING_KEYS"))
         if entry.get("pin_created") and len(pin) >= 2 and pin[0] == old:
@@ -1000,7 +1031,7 @@ class Rotator:
         for n in names:
             old_env = (self.base / entries[n]["backup"]).read_text(encoding="utf-8")
             for var in entries[n]["vars"]:
-                env = set_env(env, var, get_env(old_env, var) or "")
+                env = restore_env(env, old_env, var)
             if n == name:
                 old_pw = get_env(old_env, name)
         try:
@@ -1315,7 +1346,7 @@ class Rotator:
                 try:
                     restored, fb_text = self.env_text(), fin_backup.read_text(encoding="utf-8")
                     for var in edits:
-                        restored = set_env(restored, var, get_env(fb_text, var) or "")
+                        restored = restore_env(restored, fb_text, var)
                     write_atomic(self.env_path, restored)
                 except Exception as e:  # keep the backup and the journal: they are the only copy of the old values
                     raise RotationError(
