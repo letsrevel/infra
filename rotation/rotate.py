@@ -837,7 +837,7 @@ class Rotator:
             if "," in old:
                 raise RotationError(f"current {name} contains a comma and cannot be kept in the {fb} list")
             # csv_split strips, so the archive would hold a different value than the key in use: fail closed
-            for var, val in ((name, old), *((fb, p) for p in get_env(env, fb).split(","))):
+            for var, val in ((name, old), *((fb, p) for p in (get_env(env, fb) or "").split(","))):
                 if val != val.strip():
                     raise RotationError(f"remove leading/trailing spaces from {var} in .env first; nothing was changed")
             existing = csv_split(get_env(env, fb))

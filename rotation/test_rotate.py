@@ -2430,6 +2430,14 @@ class RoundSevenTests(Base):
         self.assertEqual((self.tmp / ".env").read_text(), before)
         self.assertEqual(rot.step_of("SALT_KEY"), "idle")
 
+    def test_a_missing_fallback_assignment_is_treated_as_empty(self) -> None:
+        before = ENV.replace("SALT_KEY_FALLBACKS=\n", "")
+        self.assertNotIn("SALT_KEY_FALLBACKS", before)
+        (self.tmp / ".env").write_text(before)
+        rot = self.make()
+        self.assertEqual(rot.stage(["SALT_KEY"]), 0)
+        self.assertEqual(rot.step_of("SALT_KEY"), "staged")
+
     def test_a_primary_that_interpolates_is_refused_before_any_change(self) -> None:
         before = ENV.replace('SALT_KEY="oldsalt+/="', 'SALT_KEY="${BASE_SALT}"')
         (self.tmp / ".env").write_text(before)
