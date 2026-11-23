@@ -2420,6 +2420,16 @@ class RoundSevenTests(Base):
         self.assertEqual(self.env("APPLE_WALLET_CERT_PATH"), "/app/certs/c1.pem")
         self.assertEqual(self.env("APPLE_WALLET_KEY_PASSWORD"), "pw")
 
+    def test_a_primary_with_surrounding_spaces_is_refused_before_phase_1(self) -> None:
+        before = ENV.replace('SALT_KEY="oldsalt+/="', "SALT_KEY=' old-key '")
+        (self.tmp / ".env").write_text(before)
+        rot = self.make()
+        self.assertEqual(rot.stage(["SALT_KEY"]), 1)
+        self.assertIn("leading/trailing spaces", "\n".join(self.out))
+        self.assertNotIn("old-key", "\n".join(self.out))
+        self.assertEqual((self.tmp / ".env").read_text(), before)
+        self.assertEqual(rot.step_of("SALT_KEY"), "idle")
+
     def test_a_primary_that_interpolates_is_refused_before_any_change(self) -> None:
         before = ENV.replace('SALT_KEY="oldsalt+/="', 'SALT_KEY="${BASE_SALT}"')
         (self.tmp / ".env").write_text(before)
