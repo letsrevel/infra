@@ -44,8 +44,8 @@ included). A second one fails at once with `another rotate.py command ... is run
 | `rollback <name...>` | Restore the secret's previous values from its backup (while `staged` or `pending`). See the rollback rule below; `TELEGRAM_BOT_TOKEN` and `PUSHOVER_USER_KEY` are forward-only: `rollback` refuses them while `staged`, and for a `pending` entry it only resolves the journal (it never restores the revoked token; see the Telegram section). A bundle is rolled back as a whole: name the bundle (`rollback aws`) or every member. Members already rolled back are skipped, so the same command retries a bundle that got stuck halfway. |
 
 Groups: `self` = `SECRET_KEY`, `SALT_KEY`, OIDC key, Grafana password. `thirdparty` = everything
-rolled in a provider console, plus `STRIPE_WEBHOOK_SECRETS`, except `TELEGRAM_BOT_TOKEN` and `PUSHOVER_USER_KEY`. `DB_PASSWORD`,
-`TELEGRAM_BOT_TOKEN` and `PUSHOVER_USER_KEY` are in no group: they are staged by name only. The legacy `STRIPE_WEBHOOK_SECRET` is in no group
+rolled in a provider console, plus `STRIPE_WEBHOOK_SECRETS`, except `TELEGRAM_BOT_TOKEN`, `PUSHOVER_USER_KEY` and `CANARY_PASSWORD`. `DB_PASSWORD`,
+`TELEGRAM_BOT_TOKEN`, `PUSHOVER_USER_KEY` and `CANARY_PASSWORD` are in no group: they are staged by name only. The legacy `STRIPE_WEBHOOK_SECRET` is in no group
 either and `stage` refuses it (`plan` shows `via STRIPE_WEBHOOK_SECRETS`): roll `STRIPE_WEBHOOK_SECRETS`, which is seeded
 from it (only when the list is empty) and keeps it valid for the grace period. `finalize` drops the old list items but leaves
 the legacy `STRIPE_WEBHOOK_SECRET` line in `.env`: it is simply unused while the list is set, and you may remove it by hand.
@@ -186,9 +186,9 @@ so the grace windows overlap.
 3. Third parties, in parallel with the windows running: follow each secret's printed console steps.
    `rotate.py stage --group thirdparty --batch` (Stripe key and webhook secrets, Brevo SMTP key,
    Google OAuth secrets, GCP service-account key, Cloudflare token, LLM / Hugging Face / IP2Location
-   keys, the Pushover app token, Discord, IndexNow, Eventbrite; not Telegram and not the Pushover user key). At each hidden prompt paste the new
+   keys, the Pushover app token, Discord, IndexNow, Eventbrite; not Telegram, not the Pushover user key and not the canary password). At each hidden prompt paste the new
    value, or press Enter to skip that secret (its console step is not done yet). One `--batch` rolls once.
-4. `rotate.py stage TELEGRAM_BOT_TOKEN` last, by name (it is in no group; `PUSHOVER_USER_KEY` is staged the same way, by name). It is NOT reversible: revoke in BotFather first, then type `TELEGRAM REVOKED` and paste the new token. A failed verify keeps the new token and prints manual recovery steps. Only `telegram` restarts.
+4. `rotate.py stage TELEGRAM_BOT_TOKEN` last, by name (it is in no group; `PUSHOVER_USER_KEY` is staged the same way, by name, and so is `CANARY_PASSWORD`: see its forward-only procedure above). It is NOT reversible: revoke in BotFather first, then type `TELEGRAM REVOKED` and paste the new token. A failed verify keeps the new token and prints manual recovery steps. Only `telegram` restarts.
 5. `DB_PASSWORD` (below), in its window.
 6. `rotate.py stage OIDC_SIGNING_KEY_PATH`. Skipped automatically when unset.
 7. After the grace windows, run `rotate.py status` and finalize only the names it shows as `staged` or
@@ -244,9 +244,12 @@ when `docker compose ps` fails for a service.
 Columns in an old dump are encrypted under the `SECRET_KEY` x `SALT_KEY` of that time, and the
 retired values are in `rotation/archive/*.age`.
 
-1. From the infra root, copy the retired keys into the `*_FALLBACKS` variables of `.env`. Pass **every** archive in
+1. From the infra root, save the current fallback lines, so that step 6 can put them back (they hold secrets: the
+   copy is mode 0600, and you delete it after step 6):
+   `( umask 077; grep -E '^(SECRET_KEY|SALT_KEY)_FALLBACKS=' .env > .env.fallbacks.pre-restore )`.
+   Then copy the retired keys into the `*_FALLBACKS` variables of `.env`. Pass **every** archive in
    `rotation/archive/*.age`. That is the safe default: a retired value the dump does not need is harmless as a
-   fallback, and step 6 removes them again. Do not filter by the date in a file name or by file mtime: names are
+   fallback, and step 6 takes out the ones this step added. Do not filter by the date in a file name or by file mtime: names are
    UTC while backups use host-local time, the first archive of a day carries no time, and copying the archive off
    the host resets mtimes. If you must narrow the list, keep every file dated from the day *before* the backup
    onwards. `finalize` writes one file per secret,
@@ -255,14 +258,16 @@ retired values are in `rotation/archive/*.age`.
    `*_FALLBACKS` variable are kept. The secrets never reach the terminal: the archives are decrypted into a fresh
    `mktemp -d` directory (mode 0700) that the subshell deletes on exit, and only counts are printed. If no key is
    found, `.env` is left unchanged and the step fails. Each archive is encrypted to the `ROTATION_AGE_RECIPIENT` set
-   when it was written, so pass the identity for **every** recipient ever used (repeat `-i`, or one identity file
-   holding them all); otherwise the loop stops at the first archive it cannot decrypt. Keep retired identities as
-   long as their archives exist.
+   when it was written, so use one identity file that holds the identity for **every** recipient ever used (put
+   one `AGE-SECRET-KEY-...` line per identity in it); otherwise the loop stops at the first archive it cannot
+   decrypt. Alternatively repeat the option: `age -d -i first.txt -i older.txt ...`. Keep retired identities as
+   long as their archives exist. Set `ID` to the quoted path of that file before you run the command.
 
    ```sh
+   ID=/path/to/identities.txt
    ( d=$(mktemp -d) && trap 'rm -rf "$d"' EXIT || exit 1
      for f in rotation/archive/*.age; do  # or your narrowed list
-       age -d -i <identity> [-i <older identity> ...] -o "$d/$(basename "$f").env" "$f" || exit 1
+       age -d -i "$ID" -o "$d/$(basename "$f").env" "$f" || exit 1
      done
      python3 - "$d"/*.env <<'PY'
    import sys
@@ -293,7 +298,9 @@ retired values are in `rotation/archive/*.age`.
 4. Start the writers on the new `.env`: `docker compose up -d --no-deps web celery_default beat telegram`.
 5. `docker compose exec -T web python manage.py rotate_encrypted_fields`, then `... --verify`. Keep the site closed
    until `--verify` succeeds. If it fails, do NOT remove the fallbacks: fix the cause and run it again.
-6. Remove the retired values from the two `*_FALLBACKS` variables again and roll: `./deploy-rollout.sh roll web celery_default beat telegram`.
+6. Put the two `*_FALLBACKS` variables back to the lines saved in step 1: remove only the values that step 1 added,
+   and keep every value that was there before. Then delete `.env.fallbacks.pre-restore` and roll:
+   `./deploy-rollout.sh roll web celery_default beat telegram`.
 
 Each `finalize` writes its own age file (mode 0600, UTC). `age` writes to a hidden `.archive-*.part` file; the file is synced and
 linked under its final name only when it is complete, so no `*.age` file is ever partial. Names: `<YYYY-MM-DD>.age`, or
