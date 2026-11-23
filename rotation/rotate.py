@@ -93,7 +93,7 @@ def refuse_multiline(text: str) -> None:
         if not m:
             continue
         rest = m.group("rest").lstrip()
-        if rest[:1] in ("'", '"') and not (_DQ.match(rest) or _SQ.match(rest)):
+        if rest[:1] in ("'", '"') and not (_DQ.match(rest) or re.match(r"^'[^']*'", rest)):
             raise RotationError(f"{m.group('key')} has a quoted value that spans lines: edit .env by hand or put "
                                 "the value on one line first; nothing was changed")
 
@@ -810,7 +810,7 @@ class Rotator:
                 step="pending", kind=s.kind, staged_at=now.isoformat(), backup=backup.name,
                 backups=old.get("backups", []) + [backup.name], vars=p.touched, recreate=p.recreate, roll=p.roll,
                 grace_end=(now + s.grace).isoformat() if s.grace and p.extra.get("phase", 2) == 2 else None,
-                updated_at=now.isoformat(), unrolled=True, **extra)  # cleared once the rollout is verified
+                updated_at=now.isoformat(), unrolled=s.reversible, **extra)  # cleared once the rollout is verified; a forward-only value has no rollback to wait for
             state["secrets"][s.name] = entry
         live_done = live_running = False
         try:
@@ -994,7 +994,7 @@ class Rotator:
             self.out(f"[{name}] the interrupted stage never wrote the new value: it was lost with the killed "
                      f"process. Get a fresh one from the provider and `stage {name}` again.")
             return
-        self.update_state(name, step="staged")  # the backups stay referenced: `finalize` cleans them as usual
+        self.update_state(name, step="staged", unrolled=False)  # the backups stay referenced: `finalize` cleans them as usual
         self.out(f"[{name}] the interrupted stage had written the new value to .env, so the entry is now "
                  f"`staged` (the old value is revoked and is NOT restored). Not rolled automatically. "
                  f"Recover by hand: check .env holds the value the provider issued, then run "

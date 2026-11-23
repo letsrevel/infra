@@ -1406,6 +1406,7 @@ class ForwardOnlyPendingTests(Base):
         self.assertEqual(rot.stage(["TELEGRAM_BOT_TOKEN"]), 0)
         state = rot.load_state()
         state["secrets"]["TELEGRAM_BOT_TOKEN"]["step"] = "pending"
+        state["secrets"]["TELEGRAM_BOT_TOKEN"]["unrolled"] = True  # models an entry written by the old code
         rot.save_state(state)
         return rot
 
@@ -1424,6 +1425,21 @@ class ForwardOnlyPendingTests(Base):
         self.assertIn("rotate.py verify", text)
         self.assertNotIn("tg-NEW", text)
         rot.refuse_if_interrupted()  # the guard no longer blocks
+        self.assertFalse(rot.load_state()["secrets"]["TELEGRAM_BOT_TOKEN"].get("unrolled"))
+        rot.finalize(["TELEGRAM_BOT_TOKEN"], force=True, archive=False)  # an old-code entry is not stuck forever
+
+    def test_kill_during_roll_then_rollback_then_finalize_succeeds(self) -> None:
+        rot = self.make(prompts=["tg-NEW"], files=[r.TELEGRAM_CONFIRM_PHRASE],
+                        on_roll=lambda _l: (_ for _ in ()).throw(KeyboardInterrupt()))
+        with self.assertRaises(KeyboardInterrupt):
+            rot.stage(["TELEGRAM_BOT_TOKEN"])
+        rot = self.make()
+        if rot.step_of("TELEGRAM_BOT_TOKEN") == "pending":
+            rot.rollback("TELEGRAM_BOT_TOKEN")  # resolves the journal as documented
+        self.assertEqual(rot.step_of("TELEGRAM_BOT_TOKEN"), "staged")
+        self.assertFalse(rot.load_state()["secrets"]["TELEGRAM_BOT_TOKEN"].get("unrolled"))
+        rot.finalize(["TELEGRAM_BOT_TOKEN"], force=True, archive=False)
+        self.assertEqual(rot.step_of("TELEGRAM_BOT_TOKEN"), "finalized")
 
     def test_pending_with_env_unchanged_resolves_to_idle(self) -> None:
         rot = self.killed_telegram_stage()
@@ -2141,6 +2157,11 @@ class CodeRabbitRound5ScriptTests(unittest.TestCase):
 
 
 class CodeRabbitRound5Tests(Base):
+    def test_single_quoted_value_ending_with_backslash_is_one_line(self) -> None:
+        r.refuse_multiline("WINPATH='C:\\dir\\'\nOTHER=1\n")  # must not raise
+        with self.assertRaisesRegex(r.RotationError, "MULTI has a quoted value that spans lines"):
+            r.refuse_multiline("MULTI='a\nb'\n")
+
     MULTI = "MULTI='line one\nSTRIPE_SECRET_KEY=example\nline three'\n"
 
     def test_a_multiline_quoted_value_makes_every_edit_refuse(self) -> None:
