@@ -169,6 +169,38 @@ services:
           memory: 512m
           cpus: '0.5'
 
+  # One-shot runner for post-deploy tasks (revel-backend#1510, ADR-0021). It runs the
+  # pending tasks once and exits. A plain `docker compose up -d` starts it again after
+  # web is healthy, and web runs `migrate` before gunicorn starts. deploy-rollout.sh runs
+  # it after the rollout. Tasks are idempotent and a SUCCEEDED task never runs again,
+  # so an extra run is safe. Nothing runs unless FEATURE_POST_DEPLOY_TASKS=True.
+  post_deploy:
+    image: ghcr.io/letsrevel/revel:latest
+    restart: "no"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    command: python manage.py run_post_deploy
+    env_file:
+      - .env
+    volumes:
+      - ./media:/app/src/media
+      - ./geo-data:/app/src/geo/data
+      - ./sentinel:/app/src/questionnaires/llms/sentinel
+      - ./certs:/app/certs:ro
+    networks:
+      - revel_network
+    depends_on:
+      web:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: '1.0'
+
   telegram:
     image: ghcr.io/letsrevel/revel:latest
     profiles: ["telegram"]

@@ -121,6 +121,19 @@ deploy() {
 
         echo -e "${YELLOW}Restarting telegram (cannot run two instances)...${NC}"
         docker compose up -d --no-deps --force-recreate telegram
+
+        # Post-deploy tasks (revel-backend#1510). web is healthy at this point, so its
+        # entrypoint has run `migrate`. Run in the foreground so the per-task lines show
+        # in this output. --no-deps: do not touch web again. A failure here does not
+        # fail the deploy, because the new release is already live. The status check
+        # shows which tasks need attention.
+        echo -e "${YELLOW}Running post-deploy tasks...${NC}"
+        if ! docker compose run --rm --no-deps post_deploy; then
+            echo -e "${RED}WARNING: the post-deploy runner did not finish. Read its output above.${NC}"
+        fi
+        if ! docker compose run --rm --no-deps post_deploy python manage.py post_deploy_status --check; then
+            echo -e "${RED}WARNING: post-deploy tasks need attention (see the status above).${NC}"
+        fi
     else
         echo -e "${GREEN}Backend image unchanged — skipping web/celery_default/beat/telegram.${NC}"
     fi
