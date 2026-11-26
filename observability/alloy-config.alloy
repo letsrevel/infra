@@ -104,6 +104,14 @@ loki.process "parse_json" {
       ticket_id       = "ticket_id",
       delivery_id     = "delivery_id",
       task_id         = "task_id",
+      // Refund triage (revel-backend #1489, #1459): a flag and Stripe/Revel ids, no personal data.
+      refund_eligible   = "refund_eligible",
+      session_id        = "session_id",
+      payment_intent_id = "payment_intent_id",
+      payment_id        = "payment_id",
+      // Stripe refund id and its failure_reason (a fixed Stripe enum code, not free text).
+      refund_id         = "refund_id",
+      failure_reason    = "failure_reason",
       task_name         = "task_name",
       notification_type = "notification_type",
       // Free text (issue #60). Ship it only after the email redaction below.
@@ -154,6 +162,12 @@ loki.process "parse_json" {
       ticket_id       = "",
       delivery_id     = "",
       task_id         = "",
+      refund_eligible   = "",
+      session_id        = "",
+      payment_intent_id = "",
+      payment_id        = "",
+      refund_id         = "",
+      failure_reason    = "",
       task_name         = "",
       notification_type = "",
       error             = "",
