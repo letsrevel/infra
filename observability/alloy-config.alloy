@@ -91,8 +91,8 @@ loki.process "parse_json" {
       user_id     = "user_id",
       ip_address  = "ip_address",
       user_agent  = "user_agent",
-      // Short codes and ids only, never free text: structlog kwargs can carry emails and
-      // exception messages, so this stays an allowlist (see stage.output below).
+      // Allowlist only (see stage.output below): structlog kwargs can carry emails and
+      // admin-entered text. Free-text fields need the email redaction in stage.replace.
       code            = "code",
       channel         = "channel",
       provider        = "provider",
@@ -104,7 +104,27 @@ loki.process "parse_json" {
       ticket_id       = "ticket_id",
       delivery_id     = "delivery_id",
       task_id         = "task_id",
+      task_name         = "task_name",
+      notification_type = "notification_type",
+      // Free text (issue #60). Ship it only after the email redaction below.
+      error     = "error",
+      exception = "exception",
     }
+  }
+
+  // `error` and `exception` are free text: SMTP errors and exception messages can contain
+  // recipient addresses (revel-backend#1504). Replace each email address with "[email]"
+  // before the values become structured metadata.
+  stage.replace {
+    source     = "error"
+    expression = "([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})"
+    replace    = "[email]"
+  }
+
+  stage.replace {
+    source     = "exception"
+    expression = "([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})"
+    replace    = "[email]"
   }
 
   stage.labels {
@@ -134,6 +154,10 @@ loki.process "parse_json" {
       ticket_id       = "",
       delivery_id     = "",
       task_id         = "",
+      task_name         = "",
+      notification_type = "",
+      error             = "",
+      exception         = "",
     }
   }
 
