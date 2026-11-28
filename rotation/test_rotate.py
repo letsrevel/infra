@@ -888,7 +888,9 @@ class DeployScriptTextTests(unittest.TestCase):
     def test_roll_check_covers_stopped_containers_and_only_the_migration_images(self) -> None:
         self.assertIn('docker compose ps -a -q "$svc"', self.text)
         self.assertIn('cids=$(docker compose ps -a -q "$svc")', self.text)  # the stale-image loop lists all containers
-        self.assertIn('case "$ref" in "$IMAGE_BACKEND" | "$IMAGE_FRONTEND") ;; *) continue ;; esac', self.text)
+        self.assertIn('want_ref=$(expected_ref "$ref")', self.text)  # backend/frontend repos only, by repository
+        self.assertIn('[ -n "$want_ref" ] || continue', self.text)
+        self.assertIn('if [ "$ref" != "$want_ref" ]; then', self.text)  # another tag than .env selects: refuse
 
     def test_roll_refusal_names_deploy_and_a_vanished_container_is_reported(self) -> None:
         self.assertIn("run '$0 deploy'", self.text)

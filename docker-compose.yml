@@ -36,7 +36,7 @@ services:
   # ============================================================================
 
   web:
-    image: ghcr.io/letsrevel/revel:latest
+    image: ghcr.io/letsrevel/revel:${REVEL_TAG:-latest}
     restart: always
     logging:
       driver: "json-file"
@@ -107,7 +107,7 @@ services:
           cpus: ${WEB_CPU_LIMIT:-6.0}
 
   celery_default:
-    image: ghcr.io/letsrevel/revel:latest
+    image: ghcr.io/letsrevel/revel:${REVEL_TAG:-latest}
     restart: always
     stop_grace_period: 300s  # Match CELERY_TASK_TIME_LIMIT so running tasks can finish
     logging:
@@ -143,7 +143,7 @@ services:
           cpus: ${CELERY_CPU_LIMIT:-4.0}
 
   beat:
-    image: ghcr.io/letsrevel/revel:latest
+    image: ghcr.io/letsrevel/revel:${REVEL_TAG:-latest}
     restart: always
     container_name: revel_beat
     logging:
@@ -170,7 +170,7 @@ services:
           cpus: '0.5'
 
   telegram:
-    image: ghcr.io/letsrevel/revel:latest
+    image: ghcr.io/letsrevel/revel:${REVEL_TAG:-latest}
     profiles: ["telegram"]
     restart: always
     container_name: revel_telegram
@@ -201,7 +201,7 @@ services:
           cpus: '1.0'
 
   frontend:
-    image: ghcr.io/letsrevel/revel-frontend:latest
+    image: ghcr.io/letsrevel/revel-frontend:${REVEL_FRONTEND_TAG:-latest}
     restart: always
     logging:
       driver: "json-file"
