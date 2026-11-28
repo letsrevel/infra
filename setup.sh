@@ -515,10 +515,10 @@ profiles=""
 say "Writing $ENV_FILE"
 # Keep an image pin (deploy-rollout.sh deploy <tag>): without it, the bring-up below
 # would move the services to latest without the rollout order.
-# Read the pins in every form Compose accepts (leading space, `export KEY=`).
+# Read the pins in every form Compose accepts (leading space, `export KEY=`, spaces around `=`).
 pin_value() {
 	[ -f "$ENV_FILE" ] || return 0
-	env_decode "$(sed -n -E "s/^[[:space:]]*(export[[:space:]]+)?$1=//p" "$ENV_FILE" | tail -n 1)"
+	env_decode "$(sed -n -E "s/^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=//p" "$ENV_FILE" | tail -n 1)"
 }
 pin_backend_tag="$(pin_value REVEL_TAG)"
 pin_frontend_tag="$(pin_value REVEL_FRONTEND_TAG)"

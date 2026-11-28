@@ -85,11 +85,16 @@ env_decode() {
 # CANARY_PASSWORD, ...), so each value must reach the shell exactly as Compose
 # would read it: a value setup.sh escaped ("p\$ss") decoded to p$ss (#56), and
 # an inline comment or trailing whitespace dropped rather than passed through.
+# As in Compose and deploy-rollout.sh, an image tag set in the shell wins over .env.
+# Record that before the loop: a duplicate key in .env must still take the last value.
+shell_revel_tag="${REVEL_TAG+set}" shell_revel_frontend_tag="${REVEL_FRONTEND_TAG+set}"
 while IFS= read -r line; do
     [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
     [[ "$line" == *=* ]] || continue
     key="${line%%=*}"
     [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    [ "$key" = REVEL_TAG ] && [ -n "$shell_revel_tag" ] && continue
+    [ "$key" = REVEL_FRONTEND_TAG ] && [ -n "$shell_revel_frontend_tag" ] && continue
     value="$(env_decode "${line#*=}")"
     export "$key=$value"
 done < .env

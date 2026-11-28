@@ -17,11 +17,11 @@
 
 # _env_file_value <KEY>: the last KEY=value (or `export KEY=value`) in ./.env, with
 # one pair of quotes and a whitespace-# comment removed. Enough for an image tag,
-# which has no quotes or spaces.
+# which has no quotes or spaces. As in Compose, spaces around `=` are allowed.
 _env_file_value() {
     local line v
     [ -f .env ] || return 0
-    line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" .env | tail -n 1) || return 0
+    line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" .env | tail -n 1) || return 0
     v="${line#*=}"
     v="${v%%[[:space:]]#*}"
     v="${v#"${v%%[![:space:]]*}"}"
@@ -81,7 +81,8 @@ check_images() {
 
 # use_backend_tag <tag>: deploy this backend tag in the current run. It exports
 # REVEL_TAG, so every `docker compose` call of this run uses the tag. It does not
-# write .env: call save_backend_tag after the pull succeeds.
+# write .env: call save_backend_tag after the pull succeeds. It also takes the
+# rotation lock (lock_rotation) for the rest of the run.
 use_backend_tag() {
     if ! valid_tag "$1"; then
         echo "Invalid image tag: '$1' (use letters, digits, _ . -; for example 3.2.0 or latest)." >&2
@@ -91,8 +92,30 @@ use_backend_tag() {
         echo ".env is a symlink: set REVEL_TAG=$1 in the target file, then run the deploy without a tag." >&2
         return 1
     fi
+    lock_rotation || return 1
     export REVEL_TAG="$1"
     resolve_images
+}
+
+# lock_rotation: take the lock that rotate.py holds while it changes .env
+# (rotation/state.lock, flock), and keep it until this script exits. A tagged
+# deploy writes .env, so it must not run during a rotation: one write would undo
+# the other. Fails at once, like rotate.py, because a rotation holds the lock
+# across its prompts. rotate.py only calls `roll`, which never takes this lock.
+lock_rotation() {
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "Warning: flock not found, so this deploy cannot check for a running rotation. Do not run rotate.py until it ends." >&2
+        return 0
+    fi
+    if ! { mkdir -p rotation && (umask 077 && : >>rotation/state.lock) && exec 9>>rotation/state.lock; } 2>/dev/null; then
+        echo "Cannot open rotation/state.lock for writing (check its owner and mode): the tagged deploy stops." >&2
+        return 1
+    fi
+    if ! flock -n 9; then
+        echo "A rotate.py command is running (rotation/state.lock). Run the tagged deploy after it ends." >&2
+        exec 9>&-
+        return 1
+    fi
 }
 
 # save_backend_tag <tag>: write REVEL_TAG=<tag> to ./.env, so that later compose
@@ -105,7 +128,7 @@ save_backend_tag() {
     local tmp=".env.bak.revel-tag.$$"
     cp -p .env "$tmp"
     awk -v tag="$1" '
-        /^[[:space:]]*(export[[:space:]]+)?REVEL_TAG=/ { if (!done) { print "REVEL_TAG=" tag; done = 1 }; next }
+        /^[[:space:]]*(export[[:space:]]+)?REVEL_TAG[[:space:]]*=/ { if (!done) { print "REVEL_TAG=" tag; done = 1 }; next }
         { print }
         END { if (!done) print "REVEL_TAG=" tag }
     ' .env > "$tmp" || { rm -f "$tmp"; return 1; }
