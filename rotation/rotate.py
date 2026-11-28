@@ -1410,7 +1410,8 @@ class Rotator:
         self.table(("SECRET", "KIND", "ENV", "STEP", "GRACE END"), self.rows())
         for f in self.unreferenced_backups():
             self.out(f"WARNING: {f} is not referenced by rotation/state.json and holds .env values (secrets) in "
-                     "plaintext (a stage or finalize killed before it recorded the file, or setup.sh). No rotation "
+                     "plaintext (a stage or finalize killed before it recorded the file, setup.sh, or an interrupted "
+                     "tagged deploy for .env.bak.revel-tag.*). No rotation "
                      "step needs it. Keep it while you recover .env by hand from it; delete it after that.")
 
     def unreferenced_backups(self) -> list[str]:

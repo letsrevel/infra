@@ -66,6 +66,19 @@ valid_tag() {
     [[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]
 }
 
+# check_images: fail with a clear message when REVEL_TAG or REVEL_FRONTEND_TAG
+# (from the shell or .env) is not a valid tag, for example when an inline comment
+# was read into the value. Without this, the pull fails with "invalid reference".
+check_images() {
+    local ref
+    for ref in "$IMAGE_BACKEND" "$IMAGE_FRONTEND"; do
+        if ! valid_tag "${ref##*:}"; then
+            echo "Invalid image tag in '$ref'. Check REVEL_TAG / REVEL_FRONTEND_TAG in the shell and in .env (write KEY=value, with no inline comment)." >&2
+            return 1
+        fi
+    done
+}
+
 # use_backend_tag <tag>: deploy this backend tag in the current run. It exports
 # REVEL_TAG, so every `docker compose` call of this run uses the tag. It does not
 # write .env: call save_backend_tag after the pull succeeds.

@@ -90,6 +90,7 @@ deploy() {
     if [ -n "$tag" ]; then
         use_backend_tag "$tag" || return 1
     fi
+    check_images || return 1
     echo -e "${YELLOW}Backend image: ${IMAGE_BACKEND}${NC}"
     [ -n "$tag" ] || pin_notice
 
@@ -121,7 +122,6 @@ deploy() {
 
     if [ "$backend_changed" -eq 0 ] && [ "$frontend_changed" -eq 0 ]; then
         echo -e "${GREEN}No new images — nothing to deploy.${NC}"
-        [ -n "$tag" ] || pin_notice
         return 0
     fi
 
@@ -225,7 +225,7 @@ roll() {
             want_ref=$(expected_ref "$ref")
             [ -n "$want_ref" ] || continue
             if [ "$ref" != "$want_ref" ]; then
-                echo -e "${RED}$svc runs $ref, but .env selects $want_ref: run '$0 deploy' (roll never changes images).${NC}" >&2
+                echo -e "${RED}$svc runs $ref, but REVEL_TAG / REVEL_FRONTEND_TAG select $want_ref: run '$0 deploy' (roll never changes images).${NC}" >&2
                 stale=1
                 continue
             fi

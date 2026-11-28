@@ -515,8 +515,13 @@ profiles=""
 say "Writing $ENV_FILE"
 # Keep an image pin (deploy-rollout.sh deploy <tag>): without it, the bring-up below
 # would move the services to latest without the rollout order.
-pin_backend_tag="$(env_value REVEL_TAG)"
-pin_frontend_tag="$(env_value REVEL_FRONTEND_TAG)"
+# Read the pins in every form Compose accepts (leading space, `export KEY=`).
+pin_value() {
+	[ -f "$ENV_FILE" ] || return 0
+	env_decode "$(sed -n -E "s/^[[:space:]]*(export[[:space:]]+)?$1=//p" "$ENV_FILE" | tail -n 1)"
+}
+pin_backend_tag="$(pin_value REVEL_TAG)"
+pin_frontend_tag="$(pin_value REVEL_FRONTEND_TAG)"
 # Secrets follow: create it owner-only before anything is written (an existing file keeps its mode on >).
 : >"$ENV_FILE"
 chmod 600 "$ENV_FILE"

@@ -181,6 +181,7 @@ case $COMMAND in
         if [ -n "$TAG" ]; then
             use_backend_tag "$TAG" || exit 1
         fi
+        check_images || exit 1
         echo -e "${YELLOW}Updating services (backend image: ${IMAGE_BACKEND})...${NC}"
         [ -n "$TAG" ] || pin_notice
         docker compose pull
