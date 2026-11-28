@@ -166,7 +166,15 @@ case $COMMAND in
         ;;
 
     update)
-        echo -e "${YELLOW}Updating services...${NC}"
+        # Optional argument: a backend image tag (for example 3.2.0, or latest).
+        # Without it, REVEL_TAG from .env is used (default latest), as before.
+        TAG=${2:-}
+        if [ -n "$TAG" ]; then
+            use_backend_tag "$TAG" || exit 1
+        else
+            resolve_images  # .env is loaded now: pick up REVEL_TAG from it
+        fi
+        echo -e "${YELLOW}Updating services (backend image: ${IMAGE_BACKEND})...${NC}"
         # Snapshot image IDs across the pull so we only announce a component
         # whose image actually changed. `docker compose up -d` already recreates
         # just the containers whose image/spec moved, so recreation needs no
@@ -174,6 +182,11 @@ case $COMMAND in
         OLD_BACKEND_IMAGE_ID=$(image_id "$IMAGE_BACKEND")
         OLD_FRONTEND_IMAGE_ID=$(image_id "$IMAGE_FRONTEND")
         docker compose pull
+        # The pull succeeded, so the tag exists: keep it in .env for later compose commands.
+        if [ -n "$TAG" ]; then
+            save_backend_tag "$TAG"
+            echo -e "${GREEN}✓ Saved REVEL_TAG=${TAG} in .env${NC}"
+        fi
         NEW_BACKEND_IMAGE_ID=$(image_id "$IMAGE_BACKEND")
         NEW_FRONTEND_IMAGE_ID=$(image_id "$IMAGE_FRONTEND")
         docker compose up -d
@@ -223,7 +236,7 @@ case $COMMAND in
         ;;
 
     *)
-        echo "Usage: $0 {up|down|restart|logs|ps|pull|update|backup}"
+        echo "Usage: $0 {up|down|restart|logs|ps|pull|update [tag]|backup}"
         echo ""
         echo "Commands:"
         echo "  up       - Start all services"
@@ -232,7 +245,8 @@ case $COMMAND in
         echo "  logs     - View logs (optionally specify service name)"
         echo "  ps       - List running services"
         echo "  pull     - Pull latest Docker images"
-        echo "  update   - Pull and restart services"
+        echo "  update   - Pull and restart services. Optional tag pins the backend"
+        echo "             image and is saved in .env: '$0 update 3.2.0' ('latest' unpins)"
         echo "  backup   - Create database backup"
         exit 1
         ;;

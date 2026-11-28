@@ -32,8 +32,10 @@ install_rollout() {
 
 # component_behind <image_ref> <service...>
 # Succeeds when any container (running or stopped) of these services runs an image ID
-# that differs from the local tag's image. Used so a `deploy` that was cut short, or a
-# `pull` done by hand, is still finished by the next `deploy`.
+# that differs from the local tag's image, or was created from another image ref (a new
+# REVEL_TAG with the same image ID). Used so a `deploy` that was cut short, or a `pull`
+# done by hand, is still finished by the next `deploy`, and so a container never keeps
+# an old ref that a later `docker compose up -d` would recreate without a rollout.
 component_behind() {
     local ref=$1 cid ids want svc
     shift
@@ -44,6 +46,7 @@ component_behind() {
         ids=$(docker compose ps -a -q "$svc") || { echo -e "${RED}docker compose ps failed for $svc${NC}" >&2; exit 1; }
         for cid in $ids; do
             [ "$(docker inspect --format '{{.Image}}' "$cid")" != "$want" ] && return 0
+            [ "$(docker inspect --format '{{.Config.Image}}' "$cid")" != "$ref" ] && return 0
         done
     done
     return 1
@@ -77,9 +80,17 @@ migrate() {
     echo -e "Future deploys will be zero-downtime using: ${YELLOW}$0 deploy${NC}"
 }
 
-# Zero-downtime deployment
+# Zero-downtime deployment. Optional argument: a backend image tag (for example
+# 3.2.0, or latest). With a tag, the deploy pulls that tag and, after the pull
+# succeeds, writes REVEL_TAG=<tag> to .env. Without a tag, it uses REVEL_TAG from
+# .env (default latest), as before.
 deploy() {
+    local tag="${1:-}"
     echo -e "${YELLOW}=== ZERO-DOWNTIME DEPLOY ===${NC}"
+    if [ -n "$tag" ]; then
+        use_backend_tag "$tag" || return 1
+    fi
+    echo -e "${YELLOW}Backend image: ${IMAGE_BACKEND}${NC}"
 
     # Snapshot image IDs, pull, snapshot again: only roll out a component whose
     # image actually moved. `docker rollout` / `--force-recreate` recreate
@@ -88,8 +99,13 @@ deploy() {
     old_backend=$(image_id "$IMAGE_BACKEND")
     old_frontend=$(image_id "$IMAGE_FRONTEND")
 
-    echo -e "${YELLOW}Pulling latest images...${NC}"
+    echo -e "${YELLOW}Pulling images...${NC}"
     docker compose pull web frontend celery_default beat telegram
+    # The pull succeeded, so the tag exists: keep it in .env for later compose commands.
+    if [ -n "$tag" ]; then
+        save_backend_tag "$tag"
+        echo -e "${GREEN}Saved REVEL_TAG=${tag} in .env${NC}"
+    fi
 
     new_backend=$(image_id "$IMAGE_BACKEND")
     new_frontend=$(image_id "$IMAGE_FRONTEND")
@@ -231,12 +247,14 @@ roll() {
 
 # Show usage
 usage() {
-    echo "Usage: $0 {install|migrate|deploy|roll [service...]}"
+    echo "Usage: $0 {install|migrate|deploy [tag]|roll [service...]}"
     echo ""
     echo "Commands:"
     echo "  install  - Install docker-rollout plugin"
     echo "  migrate  - One-time migration (causes downtime, run once after config update)"
-    echo "  deploy   - Zero-downtime deployment (use for all future deploys)"
+    echo "  deploy   - Zero-downtime deployment (use for all future deploys)."
+    echo "             Optional tag pins the backend image, e.g. '$0 deploy 3.2.0'."
+    echo "             The tag is saved in .env; '$0 deploy latest' removes the pin."
     echo "  roll     - Roll services onto the current .env, no pull, no migrate (secret rotation)"
     echo ""
     echo "First time setup:"
@@ -256,7 +274,7 @@ case "${1:-}" in
         migrate
         ;;
     deploy)
-        deploy
+        deploy "${2:-}"
         ;;
     roll)
         shift

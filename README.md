@@ -149,10 +149,14 @@ Never regenerate the key in place. A new key invalidates every ID token already 
 
 ```bash
 ./deploy.sh update      # pull the latest images and redeploy
+./deploy.sh update 3.2.0           # deploy backend 3.2.0 and keep it pinned (REVEL_TAG in .env)
+./deploy-rollout.sh deploy 3.2.0   # the same, with zero downtime (production)
 ./deploy.sh backup      # pg_dump to backup_<timestamp>.sql
 ./deploy.sh logs web    # also: up, down, restart, ps, pull
 docker compose up -d --scale celery_default=4
 ```
+
+**Pinned versions.** Deploy one exact backend version with `./deploy-rollout.sh deploy 3.2.0` (or `./deploy.sh update 3.2.0`). The script pulls `ghcr.io/letsrevel/revel:3.2.0`. After the pull succeeds, it writes `REVEL_TAG=3.2.0` to `.env`, so later `docker compose` commands keep that version. A deploy without a tag uses `REVEL_TAG` from `.env`, and `latest` when it is not set. To follow `latest` again, deploy with the tag `latest`. A tag older than the database schema is not a safe rollback: the scripts do not reverse migrations. The frontend reads `REVEL_FRONTEND_TAG` from `.env` the same way; set it by hand.
 
 `deploy-rollout.sh` replaces containers with `docker-rollout` instead of stopping them first, `safe-reboot.sh` drains Celery tasks before rebooting the host and `ALERTING_SETUP.md` covers Pushover alerts and Grafana dashboards. Persistent data lives in named volumes (`revel_postgres_data`, `redis_data`, `caddy_data`, `caddy_config` and `clamav_data`, plus one per observability service). `docker compose down -v` deletes all of it.
 
