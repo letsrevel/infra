@@ -91,6 +91,7 @@ deploy() {
         use_backend_tag "$tag" || return 1
     fi
     echo -e "${YELLOW}Backend image: ${IMAGE_BACKEND}${NC}"
+    [ -n "$tag" ] || pin_notice
 
     # Snapshot image IDs, pull, snapshot again: only roll out a component whose
     # image actually moved. `docker rollout` / `--force-recreate` recreate
@@ -120,6 +121,7 @@ deploy() {
 
     if [ "$backend_changed" -eq 0 ] && [ "$frontend_changed" -eq 0 ]; then
         echo -e "${GREEN}No new images — nothing to deploy.${NC}"
+        [ -n "$tag" ] || pin_notice
         return 0
     fi
 
@@ -195,7 +197,7 @@ roll() {
 
     # A local tag that moved since the containers were created (a `deploy` that pulled and then stopped before
     # its migrate/roll) would ship new code without its migrations: refuse and let `deploy` finish first.
-    local cid cids running ref stale=0
+    local cid cids running ref want_ref stale=0
     for svc in "${svcs[@]}"; do
         grep -Fqx -- "$svc" <<<"$active" || continue
         cids=$(docker compose ps -a -q "$svc") || { echo -e "${RED}docker compose ps failed for $svc${NC}" >&2; return 1; }
@@ -216,8 +218,17 @@ roll() {
                 return 1
             }
             # Only the images with migrations (backend, frontend) are checked; canary,
-            # alertmanager, grafana and the like are never managed by `deploy`.
-            case "$ref" in "$IMAGE_BACKEND" | "$IMAGE_FRONTEND") ;; *) continue ;; esac
+            # alertmanager, grafana and the like are never managed by `deploy`. Match by
+            # repository: a container on another tag than REVEL_TAG / REVEL_FRONTEND_TAG
+            # (a pinned deploy that stopped after it saved the tag, or a hand edit of .env)
+            # must not be rolled onto the new tag by roll.
+            want_ref=$(expected_ref "$ref")
+            [ -n "$want_ref" ] || continue
+            if [ "$ref" != "$want_ref" ]; then
+                echo -e "${RED}$svc runs $ref, but .env selects $want_ref: run '$0 deploy' (roll never changes images).${NC}" >&2
+                stale=1
+                continue
+            fi
             if [ -n "$(image_id "$ref")" ] && [ "$(docker inspect --format '{{.Image}}' "$cid")" != "$(image_id "$ref")" ]; then
                 echo -e "${RED}$svc runs an older image than the local $ref: run '$0 deploy' (it applies the migrations through the web rollout and rolls the rest; roll never changes images).${NC}" >&2
                 stale=1
@@ -254,7 +265,7 @@ usage() {
     echo "  migrate  - One-time migration (causes downtime, run once after config update)"
     echo "  deploy   - Zero-downtime deployment (use for all future deploys)."
     echo "             Optional tag pins the backend image, e.g. '$0 deploy 3.2.0'."
-    echo "             The tag is saved in .env; '$0 deploy latest' removes the pin."
+    echo "             The tag is saved in .env as REVEL_TAG; '$0 deploy latest' follows latest again."
     echo "  roll     - Roll services onto the current .env, no pull, no migrate (secret rotation)"
     echo ""
     echo "First time setup:"

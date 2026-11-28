@@ -15,30 +15,52 @@
 # (docker-compose.yml reads the same names, default `latest`). As in Compose, a
 # variable set in the shell wins over the one in ./.env.
 
-# _env_file_value <KEY>: the last KEY=value in ./.env, with one pair of quotes and a
-# " #" comment removed. Enough for an image tag, which has no quotes or spaces.
+# _env_file_value <KEY>: the last KEY=value (or `export KEY=value`) in ./.env, with
+# one pair of quotes and a whitespace-# comment removed. Enough for an image tag,
+# which has no quotes or spaces.
 _env_file_value() {
     local line v
     [ -f .env ] || return 0
-    line=$(grep -E "^[[:space:]]*$1=" .env | tail -n 1) || return 0
+    line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" .env | tail -n 1) || return 0
     v="${line#*=}"
-    v="${v%% #*}"
+    v="${v%%[[:space:]]#*}"
     v="${v#"${v%%[![:space:]]*}"}"
     v="${v%"${v##*[![:space:]]}"}"
     case "$v" in \"*\" | \'*\') v="${v:1:${#v}-2}" ;; esac
     printf '%s' "$v"
 }
 
+# Managed image repositories. roll() and component_behind match containers by these.
+REPO_BACKEND="ghcr.io/letsrevel/revel"
+REPO_FRONTEND="ghcr.io/letsrevel/revel-frontend"
+
 # resolve_images: set IMAGE_BACKEND and IMAGE_FRONTEND to the refs Compose uses.
 resolve_images() {
     local backend_tag frontend_tag
     backend_tag="${REVEL_TAG-$(_env_file_value REVEL_TAG)}"
     frontend_tag="${REVEL_FRONTEND_TAG-$(_env_file_value REVEL_FRONTEND_TAG)}"
-    IMAGE_BACKEND="ghcr.io/letsrevel/revel:${backend_tag:-latest}"
-    IMAGE_FRONTEND="ghcr.io/letsrevel/revel-frontend:${frontend_tag:-latest}"
+    IMAGE_BACKEND="${REPO_BACKEND}:${backend_tag:-latest}"
+    IMAGE_FRONTEND="${REPO_FRONTEND}:${frontend_tag:-latest}"
 }
 resolve_images
 
+# pin_notice: print a note when the backend does not follow `latest`, so that a
+# deploy without a tag that stays on the pin ("No new images") is not a surprise.
+pin_notice() {
+    case "$IMAGE_BACKEND" in
+        *:latest) ;;
+        *) echo -e "${YELLOW:-}Note: the backend is pinned to ${IMAGE_BACKEND##*:} (REVEL_TAG). To follow latest again, deploy with the tag 'latest'.${NC:-}" ;;
+    esac
+}
+
+# expected_ref <container image ref>: the ref this container must run (IMAGE_BACKEND
+# or IMAGE_FRONTEND), matched by repository; empty for any other image.
+expected_ref() {
+    case "$1" in
+        "$REPO_BACKEND":*) printf '%s' "$IMAGE_BACKEND" ;;
+        "$REPO_FRONTEND":*) printf '%s' "$IMAGE_FRONTEND" ;;
+    esac
+}
 # valid_tag <tag>: succeeds for a Docker tag (letters, digits, _ . -; 1-128 chars).
 valid_tag() {
     [[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]
@@ -63,12 +85,14 @@ use_backend_tag() {
 # save_backend_tag <tag>: write REVEL_TAG=<tag> to ./.env, so that later compose
 # commands (up -d, roll, rotation) keep the same image. Without this, they would
 # read the old value and move the services off the deployed tag. The new file
-# keeps the mode and owner of .env and replaces it atomically.
+# keeps the mode and owner of .env and replaces it atomically. The temp name
+# matches the `.env.bak.*` rule in .gitignore, so a copy that an interrupt leaves
+# behind is never committed.
 save_backend_tag() {
-    local tmp=".env.revel-tag.$$"
+    local tmp=".env.bak.revel-tag.$$"
     cp -p .env "$tmp"
     awk -v tag="$1" '
-        /^[[:space:]]*REVEL_TAG=/ { if (!done) { print "REVEL_TAG=" tag; done = 1 }; next }
+        /^[[:space:]]*(export[[:space:]]+)?REVEL_TAG=/ { if (!done) { print "REVEL_TAG=" tag; done = 1 }; next }
         { print }
         END { if (!done) print "REVEL_TAG=" tag }
     ' .env > "$tmp" || { rm -f "$tmp"; return 1; }

@@ -513,6 +513,10 @@ profiles=""
 # 8. Write .env
 # ---------------------------------------------------------------------------
 say "Writing $ENV_FILE"
+# Keep an image pin (deploy-rollout.sh deploy <tag>): without it, the bring-up below
+# would move the services to latest without the rollout order.
+pin_backend_tag="$(env_value REVEL_TAG)"
+pin_frontend_tag="$(env_value REVEL_FRONTEND_TAG)"
 # Secrets follow: create it owner-only before anything is written (an existing file keeps its mode on >).
 : >"$ENV_FILE"
 chmod 600 "$ENV_FILE"
@@ -649,6 +653,8 @@ chmod 600 "$ENV_FILE"
 	echo "GUNICORN_THREADS=${gunicorn_threads}"
 	echo "CELERY_CONCURRENCY=${celery_concurrency}"
 } >"$ENV_FILE"
+if [ -n "$pin_backend_tag" ]; then echo "REVEL_TAG=${pin_backend_tag}" >>"$ENV_FILE"; fi
+if [ -n "$pin_frontend_tag" ]; then echo "REVEL_FRONTEND_TAG=${pin_frontend_tag}" >>"$ENV_FILE"; fi
 
 # ---------------------------------------------------------------------------
 # 9. Fetch geo data (BEFORE bring-up — web auto-migrates and loads cities)
