@@ -31,3 +31,6 @@ certs/*
 ..env.tmp.*
 .state.json.tmp.*
 __pycache__/
+
+# Gauntlet agent memory (local only)
+.claude/agent-memory/
